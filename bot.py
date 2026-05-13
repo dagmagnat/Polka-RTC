@@ -48,41 +48,49 @@ dp = Dispatcher()
 
 class CreateClient(StatesGroup):
     provider = State()
+    wb_transport = State()
+    wb_room_mode = State()
     name = State()
     room = State()
 
 
 class AddDevice(StatesGroup):
     provider = State()
+    wb_transport = State()
+    wb_room_mode = State()
     room = State()
 
 
 PROVIDERS = {
-    "wbstream_auto": {
-        "title": "WB Stream — авто ID",
-        "short": "WB auto",
+    "wbstream": {
+        "title": "WB Stream",
+        "short": "WB",
         "carrier": "wbstream",
-        "transport": "datachannel",
-        "needs_room_input": False,
-        "auto_room": True,
-    },
-    "wbstream_manual": {
-        "title": "WB Stream — ручной ID",
-        "short": "WB manual",
-        "carrier": "wbstream",
-        "transport": "datachannel",
-        "needs_room_input": True,
-        "auto_room": False,
     },
     "telemost": {
         "title": "Яндекс Телемост",
         "short": "Telemost",
         "carrier": "telemost",
         "transport": "vp8channel",
-        "needs_room_input": True,
-        "auto_room": False,
     },
 }
+
+WB_TRANSPORTS = {
+    "datachannel": {
+        "title": "datachannel — максимальная скорость",
+        "short": "data",
+    },
+    "vp8channel": {
+        "title": "vp8channel — высокая скорость",
+        "short": "vp8",
+    },
+}
+
+
+BTN_CREATE = "➕ Создать клиента"
+BTN_CLIENTS = "📋 Список клиентов"
+BTN_BACKUP = "💾 Создать бэкап"
+BTN_HELP = "ℹ️ Помощь"
 
 
 def is_admin(user_id: int) -> bool:
@@ -102,6 +110,7 @@ def run_cmd(cmd: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
 
 def setup_db() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
@@ -119,9 +128,11 @@ def setup_db() -> None:
             )
             """
         )
+
         columns = {row[1] for row in conn.execute("PRAGMA table_info(clients)").fetchall()}
         if "provider" not in columns:
             conn.execute("ALTER TABLE clients ADD COLUMN provider TEXT NOT NULL DEFAULT ''")
+
         conn.commit()
 
 
@@ -137,9 +148,17 @@ def db_save(row: dict) -> None:
             ))
             """,
             (
-                row["client_id"], row["display_name"], row["device_no"], row["provider"],
-                row["carrier"], row["transport"], row["room_id"], row["auth_key"], row["uri"],
-                row["client_id"], int(time.time()),
+                row["client_id"],
+                row["display_name"],
+                row["device_no"],
+                row["provider"],
+                row["carrier"],
+                row["transport"],
+                row["room_id"],
+                row["auth_key"],
+                row["uri"],
+                row["client_id"],
+                int(time.time()),
             ),
         )
         conn.commit()
@@ -172,6 +191,31 @@ def next_device_no(display_name: str) -> int:
             (display_name,),
         ).fetchone()
         return int(row[0] or 1)
+
+
+def stats() -> dict:
+    rows = db_all()
+    active = 0
+    by_provider = {}
+    by_transport = {}
+
+    for row in rows:
+        if is_active(row["client_id"]):
+            active += 1
+
+        provider = row["provider"] or row["carrier"]
+        by_provider[provider] = by_provider.get(provider, 0) + 1
+
+        transport = row["transport"]
+        by_transport[transport] = by_transport.get(transport, 0) + 1
+
+    return {
+        "total": len(rows),
+        "active": active,
+        "stopped": len(rows) - active,
+        "by_provider": by_provider,
+        "by_transport": by_transport,
+    }
 
 
 def slugify(text: str) -> str:
@@ -211,12 +255,14 @@ def extract_room_id(text: str) -> str:
     found = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9-]{5,}", text)
     bad = {
         "https", "http", "telemost", "yandex", "wbstream", "stream", "wb", "ru",
-        "com", "www", "join", "meeting",
+        "com", "www", "join", "meeting", "room",
     }
+
     for item in found:
         item = item.strip().strip("/")
         if item.lower() not in bad:
             return item
+
     return ""
 
 
@@ -232,9 +278,11 @@ def generate_room_id(carrier: str) -> str:
         ],
         timeout=180,
     )
+
     lines = [x.strip() for x in result.stdout.splitlines() if x.strip()]
     if not lines:
         raise RuntimeError(f"olcrtc не вернул Room ID. STDERR:\n{result.stderr}")
+
     return lines[-1]
 
 
@@ -284,18 +332,37 @@ def restart_service(client_id: str) -> None:
 def is_active(client_id: str) -> bool:
     result = subprocess.run(
         ["systemctl", "is-active", service_name(client_id)],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     return result.stdout.strip() == "active"
 
 
-def get_logs(client_id: str) -> str:
+def get_logs(client_id: str, lines: int = 80) -> str:
     result = subprocess.run(
-        ["journalctl", "-u", service_name(client_id), "-n", "80", "--no-pager"],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ["journalctl", "-u", service_name(client_id), "-n", str(lines), "--no-pager"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     text = result.stdout.strip() or result.stderr.strip()
     return text[-3500:] if text else "Логов пока нет."
+
+
+def get_env_safe(client_id: str) -> str:
+    env_path = CLIENT_ENV_DIR / f"{client_id}.env"
+    if not env_path.exists():
+        return "env-файл не найден."
+
+    safe_lines = []
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("AUTH_KEY="):
+            safe_lines.append("AUTH_KEY=***hidden***")
+        else:
+            safe_lines.append(line)
+
+    return "\n".join(safe_lines)
 
 
 def create_backup() -> str:
@@ -304,49 +371,6 @@ def create_backup() -> str:
     if not Path(path).exists():
         raise RuntimeError(f"backup file not found: {path}")
     return path
-
-
-def clients_inline_kb() -> InlineKeyboardMarkup | None:
-    rows = db_all()
-    if not rows:
-        return None
-
-    buttons = []
-    for row in rows:
-        active = is_active(row["client_id"])
-        status = "🟢" if active else "🔴"
-        provider_key = row["provider"] or row["carrier"]
-        provider_title = PROVIDERS.get(provider_key, {}).get("short", provider_key)
-        label = f"{status} {row['display_name']}-{row['device_no']} | {provider_title}"
-        buttons.append([
-            InlineKeyboardButton(
-                text=label[:60],
-                callback_data=f"client:{row['client_id']}",
-            )
-        ])
-
-    buttons.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def help_text() -> str:
-    return (
-        "Режимы создания:\n\n"
-        "1. WB Stream — авто ID\n"
-        "   Бот запускает olcrtc -mode gen и сам получает Room ID.\n\n"
-        "2. WB Stream — ручной ID\n"
-        "   Вы заранее создаёте/берёте Room ID и вставляете его в бота.\n\n"
-        "3. Яндекс Телемост\n"
-        "   Вы заранее создаёте встречу и вставляете ID/ссылку.\n\n"
-        "Одно устройство = одна отдельная ссылка и один QR.\n"
-        "Если авто WB не подключается, используйте WB Stream — ручной ID."
-    )
-
-
-BTN_CREATE = "➕ Создать клиента"
-BTN_CLIENTS = "📋 Список клиентов"
-BTN_BACKUP = "💾 Создать бэкап"
-BTN_HELP = "ℹ️ Помощь"
 
 
 def main_kb() -> ReplyKeyboardMarkup:
@@ -366,24 +390,84 @@ def main_kb() -> ReplyKeyboardMarkup:
 def provider_kb(prefix: str = "provider") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🟣 WB Stream — авто ID", callback_data=f"{prefix}:wbstream_auto")],
-            [InlineKeyboardButton(text="✍️ WB Stream — ручной ID", callback_data=f"{prefix}:wbstream_manual")],
+            [InlineKeyboardButton(text="🟣 WB Stream", callback_data=f"{prefix}:wbstream")],
             [InlineKeyboardButton(text="🟡 Яндекс Телемост", callback_data=f"{prefix}:telemost")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")],
         ]
     )
 
 
+def wb_transport_kb(prefix: str = "wbtransport") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ datachannel — максимальная скорость", callback_data=f"{prefix}:datachannel")],
+            [InlineKeyboardButton(text="🎥 vp8channel — высокая скорость", callback_data=f"{prefix}:vp8channel")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="create")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
+        ]
+    )
+
+
+def wb_room_mode_kb(prefix: str = "wbroom") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🤖 Сгенерировать ID автоматически", callback_data=f"{prefix}:auto")],
+            [InlineKeyboardButton(text="✍️ Ввести ID вручную", callback_data=f"{prefix}:manual")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="create")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
+        ]
+    )
+
+
+def clients_inline_kb() -> InlineKeyboardMarkup | None:
+    rows = db_all()
+    if not rows:
+        return None
+
+    buttons = []
+    for row in rows:
+        active = is_active(row["client_id"])
+        status = "🟢" if active else "🔴"
+        provider_key = row["provider"] or row["carrier"]
+
+        if row["carrier"] == "wbstream":
+            provider_title = f"WB {WB_TRANSPORTS.get(row['transport'], {}).get('short', row['transport'])}"
+        else:
+            provider_title = PROVIDERS.get(provider_key, {}).get("short", provider_key)
+
+        label = f"{status} {row['display_name']}-{row['device_no']} | {provider_title}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=label[:60],
+                callback_data=f"client:{row['client_id']}",
+            )
+        ])
+
+    buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def client_kb(client_id: str) -> InlineKeyboardMarkup:
+    active = is_active(client_id)
+
+    start_stop_row = (
+        [InlineKeyboardButton(text="⏸ Остановить", callback_data=f"stop:{client_id}")]
+        if active
+        else [InlineKeyboardButton(text="▶️ Запустить", callback_data=f"startsvc:{client_id}")]
+    )
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔗 Ссылка", callback_data=f"link:{client_id}")],
             [InlineKeyboardButton(text="📷 QR", callback_data=f"qr:{client_id}")],
             [InlineKeyboardButton(text="➕ Добавить устройство", callback_data=f"add:{client_id}")],
             [InlineKeyboardButton(text="🔄 Перезапустить", callback_data=f"restart:{client_id}")],
+            start_stop_row,
+            [InlineKeyboardButton(text="🧪 Диагностика", callback_data=f"diag:{client_id}")],
             [InlineKeyboardButton(text="📜 Логи", callback_data=f"logs:{client_id}")],
             [InlineKeyboardButton(text="🗑 Удалить устройство", callback_data=f"del:{client_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="list")],
+            [InlineKeyboardButton(text="📋 Список клиентов", callback_data="list")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
         ]
     )
 
@@ -395,6 +479,53 @@ def confirm_delete_kb(client_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❌ Отмена", callback_data=f"client:{client_id}")],
         ]
     )
+
+
+def help_text() -> str:
+    return (
+        "Режимы создания:\n\n"
+        "1. WB Stream\n"
+        "   После выбора WB бот спросит transport:\n"
+        "   - datachannel — максимальная скорость\n"
+        "   - vp8channel — высокая скорость\n\n"
+        "   Затем бот спросит, как получить ID:\n"
+        "   - сгенерировать автоматически\n"
+        "   - ввести вручную\n\n"
+        "2. Яндекс Телемост\n"
+        "   Используется telemost + vp8channel.\n"
+        "   Нужно заранее создать встречу и вставить ID/ссылку.\n\n"
+        "Одно устройство = одна отдельная ссылка и один QR."
+    )
+
+
+def dashboard_text() -> str:
+    data = stats()
+    by_provider = data["by_provider"]
+    by_transport = data["by_transport"]
+
+    wb_count = by_provider.get("wbstream", 0)
+    telemost_count = by_provider.get("telemost", 0)
+
+    data_count = by_transport.get("datachannel", 0)
+    vp8_count = by_transport.get("vp8channel", 0)
+
+    return (
+        "Polka RTC\n\n"
+        "📊 Дашборд\n"
+        f"Всего устройств: {data['total']}\n"
+        f"🟢 Работают: {data['active']}\n"
+        f"🔴 Остановлены: {data['stopped']}\n\n"
+        "Провайдеры:\n"
+        f"🟣 WB Stream: {wb_count}\n"
+        f"🟡 Яндекс Телемост: {telemost_count}\n\n"
+        "Транспорты:\n"
+        f"⚡ datachannel: {data_count}\n"
+        f"🎥 vp8channel: {vp8_count}"
+    )
+
+
+async def send_main_menu(message: Message) -> None:
+    await message.answer(dashboard_text(), reply_markup=main_kb())
 
 
 async def send_uri(message: Message, client_id: str, uri: str) -> None:
@@ -409,6 +540,7 @@ async def send_qr(message: Message, client_id: str, uri: str) -> None:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     tmp.close()
     img.save(tmp.name)
+
     try:
         await message.answer_photo(FSInputFile(tmp.name), caption=f"QR для {client_id}")
     finally:
@@ -418,18 +550,45 @@ async def send_qr(message: Message, client_id: str, uri: str) -> None:
             pass
 
 
-async def create_device(message: Message, display_name: str, provider_key: str, room_id: str | None = None) -> None:
+async def ask_room_id(message: Message, carrier: str) -> None:
+    if carrier == "wbstream":
+        await message.answer(
+            "Отправьте ID WB Stream.\n\n"
+            "Можно вставить только ID, например:\n"
+            "<code>019e20e6-9f02-77db-a198-2e97a3278d89</code>\n\n"
+            "Или вставить ссылку/текст, если ID в нём присутствует.",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            "Отправьте ID/ссылку Яндекс Телемоста.\n\n"
+            "Например:\n"
+            "<code>https://telemost.yandex.ru/j/220722504595729</code>",
+            parse_mode="HTML",
+        )
+
+
+async def create_device(
+    message: Message,
+    display_name: str,
+    provider_key: str,
+    transport: str,
+    room_mode: str,
+    room_id: str | None = None,
+) -> None:
     provider = PROVIDERS[provider_key]
     carrier = provider["carrier"]
-    transport = provider["transport"]
+
     device_no = next_device_no(display_name)
     client_id = make_client_id(display_name, device_no)
 
-    if provider["needs_room_input"]:
+    if room_mode == "manual":
         if not room_id:
             raise RuntimeError("Не указан Room ID")
-    else:
+    elif room_mode == "auto":
         room_id = generate_room_id(carrier)
+    else:
+        raise RuntimeError(f"Неизвестный режим Room ID: {room_mode}")
 
     auth_key = make_key()
     uri = make_uri(carrier, transport, room_id, auth_key, client_id)
@@ -451,45 +610,33 @@ async def create_device(message: Message, display_name: str, provider_key: str, 
     db_save(row)
 
     await message.answer(
-        f"Готово.\nКлиент: <b>{display_name}</b>\nУстройство: <b>{device_no}</b>\n"
-        f"Провайдер: <b>{provider['title']}</b>\nRoom ID: <code>{room_id}</code>",
+        f"Готово.\n"
+        f"Клиент: <b>{display_name}</b>\n"
+        f"Устройство: <b>{device_no}</b>\n"
+        f"Провайдер: <b>{provider['title']}</b>\n"
+        f"Transport: <b>{transport}</b>\n"
+        f"Room ID: <code>{room_id}</code>",
         parse_mode="HTML",
     )
     await send_uri(message, client_id, uri)
     await send_qr(message, client_id, uri)
 
 
-async def ask_room_id(message: Message, provider_key: str) -> None:
-    provider = PROVIDERS[provider_key]
-    if provider["carrier"] == "wbstream":
-        await message.answer(
-            "Отправьте ID WB Stream.\n\n"
-            "Можно вставить только ID, например:\n"
-            "<code>019e20e6-9f02-77db-a198-2e97a3278d89</code>\n\n"
-            "Или вставить ссылку/текст, если ID в нём присутствует.",
-            parse_mode="HTML",
-        )
-    else:
-        await message.answer(
-            "Отправьте ID/ссылку Яндекс Телемоста.\n\n"
-            "Например:\n"
-            "<code>https://telemost.yandex.ru/j/220722504595729</code>",
-            parse_mode="HTML",
-        )
-
-
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
+
     if not is_admin(message.from_user.id):
         await message.answer("Нет доступа.")
         return
-    await message.answer("Polka RTC\n\nВыберите действие:", reply_markup=main_kb())
+
+    await send_main_menu(message)
 
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
+
     if is_admin(message.from_user.id):
         await message.answer("Отменено.", reply_markup=main_kb())
 
@@ -503,7 +650,7 @@ async def cmd_create(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(CreateClient.provider)
-    await message.answer("Выберите режим:", reply_markup=provider_kb("provider"))
+    await message.answer("Выберите провайдера:", reply_markup=provider_kb("provider"))
 
 
 @dp.message(Command("clients"))
@@ -572,9 +719,10 @@ async def create_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     await state.clear()
     await state.set_state(CreateClient.provider)
-    await callback.message.answer("Выберите режим:", reply_markup=provider_kb("provider"))
+    await callback.message.answer("Выберите провайдера:", reply_markup=provider_kb("provider"))
     await callback.answer()
 
 
@@ -583,18 +731,72 @@ async def choose_provider(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     provider_key = callback.data.split(":", 1)[1]
     if provider_key not in PROVIDERS:
-        await callback.answer("Неизвестный режим", show_alert=True)
+        await callback.answer("Неизвестный провайдер", show_alert=True)
         return
+
     await state.update_data(provider=provider_key)
-    await state.set_state(CreateClient.name)
-    provider = PROVIDERS[provider_key]
+
+    if provider_key == "wbstream":
+        await state.set_state(CreateClient.wb_transport)
+        await callback.message.answer(
+            "WB Stream\n\nВыберите transport:",
+            reply_markup=wb_transport_kb("wbtransport"),
+        )
+    else:
+        await state.update_data(transport="vp8channel", room_mode="manual")
+        await state.set_state(CreateClient.name)
+        await callback.message.answer(
+            "Яндекс Телемост\n"
+            "Carrier: telemost\n"
+            "Transport: vp8channel\n\n"
+            "Введите имя клиента."
+        )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("wbtransport:"))
+async def choose_wb_transport(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    transport = callback.data.split(":", 1)[1]
+    if transport not in WB_TRANSPORTS:
+        await callback.answer("Неизвестный transport", show_alert=True)
+        return
+
+    await state.update_data(transport=transport)
+    await state.set_state(CreateClient.wb_room_mode)
+
     await callback.message.answer(
-        f"Режим: {provider['title']}\n"
-        f"Carrier: {provider['carrier']}\n"
-        f"Transport: {provider['transport']}\n\n"
-        "Введите имя клиента."
+        f"WB Stream\nTransport: {transport}\n\n"
+        "Как получить ID звонка?",
+        reply_markup=wb_room_mode_kb("wbroom"),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("wbroom:"))
+async def choose_wb_room_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    room_mode = callback.data.split(":", 1)[1]
+    if room_mode not in {"auto", "manual"}:
+        await callback.answer("Неизвестный режим ID", show_alert=True)
+        return
+
+    await state.update_data(room_mode=room_mode)
+    await state.set_state(CreateClient.name)
+
+    mode_text = "автоматический ID" if room_mode == "auto" else "ручной ID"
+    await callback.message.answer(
+        f"WB Stream\nРежим: {mode_text}\n\nВведите имя клиента."
     )
     await callback.answer()
 
@@ -603,39 +805,58 @@ async def choose_provider(callback: CallbackQuery, state: FSMContext) -> None:
 async def create_name(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
+
     name = message.text.strip()
     if len(name) < 2:
         await message.answer("Имя слишком короткое. Введите ещё раз.")
         return
+
     await state.update_data(name=name)
     data = await state.get_data()
-    provider = PROVIDERS[data["provider"]]
-    if provider["needs_room_input"]:
+
+    if data["room_mode"] == "manual":
         await state.set_state(CreateClient.room)
-        await ask_room_id(message, data["provider"])
-    else:
-        try:
-            await create_device(message, name, data["provider"])
-            await state.clear()
-            await message.answer("Меню:", reply_markup=main_kb())
-        except Exception as e:
-            await state.clear()
-            await message.answer(f"Ошибка создания:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+        await ask_room_id(message, PROVIDERS[data["provider"]]["carrier"])
+        return
+
+    try:
+        await create_device(
+            message,
+            name,
+            data["provider"],
+            data["transport"],
+            data["room_mode"],
+        )
+        await state.clear()
+        await send_main_menu(message)
+    except Exception as e:
+        await state.clear()
+        await message.answer(f"Ошибка создания:\n\n<code>{str(e)}</code>", parse_mode="HTML")
 
 
 @dp.message(CreateClient.room)
 async def create_room(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
+
     data = await state.get_data()
     room_id = extract_room_id(message.text)
+
     if not room_id:
         await message.answer("Не нашёл ID. Отправьте ссылку или ID ещё раз.")
         return
+
     try:
-        await create_device(message, data["name"], data["provider"], room_id)
+        await create_device(
+            message,
+            data["name"],
+            data["provider"],
+            data["transport"],
+            data["room_mode"],
+            room_id,
+        )
         await state.clear()
-        await message.answer("Меню:", reply_markup=main_kb())
+        await send_main_menu(message)
     except Exception as e:
         await state.clear()
         await message.answer(f"Ошибка создания:\n\n<code>{str(e)}</code>", parse_mode="HTML")
@@ -662,21 +883,25 @@ async def client_info(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     client_id = callback.data.split(":", 1)[1]
     row = db_get(client_id)
+
     if not row:
         await callback.message.answer("Клиент не найден.", reply_markup=main_kb())
         await callback.answer()
         return
+
     active = is_active(client_id)
     provider_key = row["provider"] or row["carrier"]
     provider_title = PROVIDERS.get(provider_key, {}).get("title", provider_key)
+
     await callback.message.answer(
         f"Клиент: <b>{row['display_name']}</b>\n"
         f"Устройство: {row['device_no']}\n"
         f"ID: <code>{row['client_id']}</code>\n"
         f"Статус: {'🟢 работает' if active else '🔴 не работает'}\n"
-        f"Режим: {provider_title}\n"
+        f"Провайдер: {provider_title}\n"
         f"Carrier: {row['carrier']}\n"
         f"Transport: {row['transport']}\n"
         f"Room ID: <code>{row['room_id']}</code>",
@@ -691,17 +916,21 @@ async def add_device_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     client_id = callback.data.split(":", 1)[1]
     row = db_get(client_id)
+
     if not row:
         await callback.message.answer("Клиент не найден.")
         await callback.answer()
         return
+
     await state.clear()
     await state.update_data(display_name=row["display_name"])
     await state.set_state(AddDevice.provider)
+
     await callback.message.answer(
-        f"Добавить устройство для: <b>{row['display_name']}</b>\n\nВыберите режим:",
+        f"Добавить устройство для: <b>{row['display_name']}</b>\n\nВыберите провайдера:",
         parse_mode="HTML",
         reply_markup=provider_kb("addprovider"),
     )
@@ -713,24 +942,82 @@ async def add_provider(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     provider_key = callback.data.split(":", 1)[1]
     if provider_key not in PROVIDERS:
-        await callback.answer("Неизвестный режим", show_alert=True)
+        await callback.answer("Неизвестный провайдер", show_alert=True)
         return
+
     await state.update_data(provider=provider_key)
-    data = await state.get_data()
-    provider = PROVIDERS[provider_key]
-    if provider["needs_room_input"]:
+
+    if provider_key == "wbstream":
+        await state.set_state(AddDevice.wb_transport)
+        await callback.message.answer(
+            "WB Stream\n\nВыберите transport:",
+            reply_markup=wb_transport_kb("addwbtransport"),
+        )
+    else:
+        await state.update_data(transport="vp8channel", room_mode="manual")
         await state.set_state(AddDevice.room)
-        await ask_room_id(callback.message, provider_key)
+        await ask_room_id(callback.message, "telemost")
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("addwbtransport:"))
+async def add_wb_transport(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    transport = callback.data.split(":", 1)[1]
+    if transport not in WB_TRANSPORTS:
+        await callback.answer("Неизвестный transport", show_alert=True)
+        return
+
+    await state.update_data(transport=transport)
+    await state.set_state(AddDevice.wb_room_mode)
+
+    await callback.message.answer(
+        f"WB Stream\nTransport: {transport}\n\n"
+        "Как получить ID звонка?",
+        reply_markup=wb_room_mode_kb("addwbroom"),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("addwbroom:"))
+async def add_wb_room_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    room_mode = callback.data.split(":", 1)[1]
+    if room_mode not in {"auto", "manual"}:
+        await callback.answer("Неизвестный режим ID", show_alert=True)
+        return
+
+    await state.update_data(room_mode=room_mode)
+    data = await state.get_data()
+
+    if room_mode == "manual":
+        await state.set_state(AddDevice.room)
+        await ask_room_id(callback.message, "wbstream")
     else:
         try:
-            await create_device(callback.message, data["display_name"], provider_key)
+            await create_device(
+                callback.message,
+                data["display_name"],
+                data["provider"],
+                data["transport"],
+                data["room_mode"],
+            )
             await state.clear()
-            await callback.message.answer("Меню:", reply_markup=main_kb())
+            await send_main_menu(callback.message)
         except Exception as e:
             await state.clear()
             await callback.message.answer(f"Ошибка создания:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
     await callback.answer()
 
 
@@ -738,15 +1025,25 @@ async def add_provider(callback: CallbackQuery, state: FSMContext) -> None:
 async def add_room(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
+
     data = await state.get_data()
     room_id = extract_room_id(message.text)
+
     if not room_id:
         await message.answer("Не нашёл ID. Отправьте ссылку или ID ещё раз.")
         return
+
     try:
-        await create_device(message, data["display_name"], data["provider"], room_id)
+        await create_device(
+            message,
+            data["display_name"],
+            data["provider"],
+            data["transport"],
+            data["room_mode"],
+            room_id,
+        )
         await state.clear()
-        await message.answer("Меню:", reply_markup=main_kb())
+        await send_main_menu(message)
     except Exception as e:
         await state.clear()
         await message.answer(f"Ошибка создания:\n\n<code>{str(e)}</code>", parse_mode="HTML")
@@ -757,6 +1054,7 @@ async def show_link(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     row = db_get(callback.data.split(":", 1)[1])
     if row:
         await send_uri(callback.message, row["client_id"], row["uri"])
@@ -770,6 +1068,7 @@ async def show_qr(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     row = db_get(callback.data.split(":", 1)[1])
     if row:
         await send_qr(callback.message, row["client_id"], row["uri"])
@@ -783,12 +1082,66 @@ async def restart_client(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     client_id = callback.data.split(":", 1)[1]
+
     try:
         restart_service(client_id)
         await callback.message.answer(f"Перезапущен: {client_id}")
     except Exception as e:
         await callback.message.answer(f"Ошибка перезапуска:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("stop:"))
+async def stop_client(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+    stop_service(client_id)
+
+    await callback.message.answer(f"Остановлен: {client_id}")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("startsvc:"))
+async def start_client(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+
+    try:
+        start_service(client_id)
+        await callback.message.answer(f"Запущен: {client_id}")
+    except Exception as e:
+        await callback.message.answer(f"Ошибка запуска:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("diag:"))
+async def diagnostics(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+    active = is_active(client_id)
+    env_safe = get_env_safe(client_id)
+    logs = get_logs(client_id, lines=40)
+
+    await callback.message.answer(
+        f"Диагностика {client_id}\n\n"
+        f"Статус: {'active' if active else 'inactive'}\n\n"
+        f"ENV:\n<code>{env_safe}</code>\n\n"
+        f"LOGS:\n<code>{logs}</code>",
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -797,8 +1150,10 @@ async def show_logs(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     client_id = callback.data.split(":", 1)[1]
     text = get_logs(client_id)
+
     await callback.message.answer(f"Логи {client_id}:\n\n<code>{text}</code>", parse_mode="HTML")
     await callback.answer()
 
@@ -808,7 +1163,9 @@ async def delete_ask(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     client_id = callback.data.split(":", 1)[1]
+
     await callback.message.answer(
         f"Удалить устройство?\n\n<code>{client_id}</code>",
         parse_mode="HTML",
@@ -822,16 +1179,22 @@ async def delete_ok(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     client_id = callback.data.split(":", 1)[1]
+
     try:
         stop_service(client_id)
+
         env_path = CLIENT_ENV_DIR / f"{client_id}.env"
         if env_path.exists():
             env_path.unlink()
+
         db_delete(client_id)
         await callback.message.answer(f"Удалено: {client_id}", reply_markup=main_kb())
+
     except Exception as e:
         await callback.message.answer(f"Ошибка удаления:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
     await callback.answer()
 
 
@@ -840,7 +1203,9 @@ async def backup_cb(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+
     await callback.message.answer("Создаю бэкап...")
+
     try:
         path = create_backup()
         await callback.message.answer_document(
@@ -849,16 +1214,19 @@ async def backup_cb(callback: CallbackQuery) -> None:
         )
     except Exception as e:
         await callback.message.answer(f"Ошибка бэкапа:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu")
 async def menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await callback.message.answer("Меню:", reply_markup=main_kb())
+
+    await send_main_menu(callback.message)
     await callback.answer()
 
 
