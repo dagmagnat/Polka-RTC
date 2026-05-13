@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CARRIER:?CARRIER is required}"
+: "${TRANSPORT:?TRANSPORT is required}"
+: "${ROOM_ID:?ROOM_ID is required}"
+: "${CLIENT_ID:?CLIENT_ID is required}"
+: "${AUTH_KEY:?AUTH_KEY is required}"
+: "${DNS:=1.1.1.1:53}"
+
+CMD=(
+  /opt/olcrtc/bin/olcrtc
+  -mode srv
+  -carrier "$CARRIER"
+  -transport "$TRANSPORT"
+  -id "$ROOM_ID"
+  -client-id "$CLIENT_ID"
+  -key "$AUTH_KEY"
+  -link direct
+  -dns "$DNS"
+  -data data
+)
+
+if [[ "$TRANSPORT" == "vp8channel" ]]; then
+  CMD+=(
+    -vp8-fps "${VP8_FPS:-60}"
+    -vp8-batch "${VP8_BATCH:-64}"
+  )
+fi
+
+exec "${CMD[@]}"

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BACKUP_DIR="${BACKUP_DIR:-/var/backups/polka-rtc}"
+TS="$(date +%F_%H-%M-%S)"
+OUT="${BACKUP_DIR}/polka-rtc-backup-${TS}.tar.gz"
+
+mkdir -p "$BACKUP_DIR"
+
+tar -czf "$OUT" \
+  --ignore-failed-read \
+  /var/lib/polka-rtc \
+  /etc/olcrtc/clients \
+  /etc/polka-rtc-bot.env \
+  /etc/systemd/system/olcrtc-client@.service \
+  /etc/systemd/system/polka-rtc-bot.service \
+  /usr/local/bin/polka-olcrtc-run \
+  /usr/local/bin/polka-rtc-backup
+
+chmod 600 "$OUT"
+echo "$OUT"
