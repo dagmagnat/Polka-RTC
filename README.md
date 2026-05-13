@@ -6,7 +6,7 @@ Telegram bot + one-command installer for managing per-client OlcRTC instances.
 
 ```bash
 apt update && apt install -y curl git
-bash <(curl -fsSL https://raw.githubusercontent.com/dagmagnat/polka-rtc/main/install.sh)
+apt update && apt install -y git curl && rm -rf /root/polka-rtc && git clone https://github.com/dagmagnat/polka-rtc.git /root/polka-rtc && cd /root/polka-rtc && bash install.sh
 ```
 
 Installer asks for:
