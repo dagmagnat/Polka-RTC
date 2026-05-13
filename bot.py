@@ -15,11 +15,14 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -303,14 +306,60 @@ def create_backup() -> str:
     return path
 
 
-def main_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Создать клиента", callback_data="create")],
-            [InlineKeyboardButton(text="📋 Клиенты", callback_data="list")],
-            [InlineKeyboardButton(text="💾 Создать бэкап", callback_data="backup")],
-            [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")],
-        ]
+def clients_inline_kb() -> InlineKeyboardMarkup | None:
+    rows = db_all()
+    if not rows:
+        return None
+
+    buttons = []
+    for row in rows:
+        active = is_active(row["client_id"])
+        status = "🟢" if active else "🔴"
+        provider_key = row["provider"] or row["carrier"]
+        provider_title = PROVIDERS.get(provider_key, {}).get("short", provider_key)
+        label = f"{status} {row['display_name']}-{row['device_no']} | {provider_title}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=label[:60],
+                callback_data=f"client:{row['client_id']}",
+            )
+        ])
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def help_text() -> str:
+    return (
+        "Режимы создания:\n\n"
+        "1. WB Stream — авто ID\n"
+        "   Бот запускает olcrtc -mode gen и сам получает Room ID.\n\n"
+        "2. WB Stream — ручной ID\n"
+        "   Вы заранее создаёте/берёте Room ID и вставляете его в бота.\n\n"
+        "3. Яндекс Телемост\n"
+        "   Вы заранее создаёте встречу и вставляете ID/ссылку.\n\n"
+        "Одно устройство = одна отдельная ссылка и один QR.\n"
+        "Если авто WB не подключается, используйте WB Stream — ручной ID."
+    )
+
+
+BTN_CREATE = "➕ Создать клиента"
+BTN_CLIENTS = "📋 Список клиентов"
+BTN_BACKUP = "💾 Создать бэкап"
+BTN_HELP = "ℹ️ Помощь"
+
+
+def main_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_CREATE)],
+            [KeyboardButton(text=BTN_CLIENTS)],
+            [KeyboardButton(text=BTN_BACKUP)],
+            [KeyboardButton(text=BTN_HELP)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Выберите действие",
     )
 
 
@@ -445,22 +494,76 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
         await message.answer("Отменено.", reply_markup=main_kb())
 
 
+@dp.message(Command("create"))
+@dp.message(F.text == BTN_CREATE)
+async def cmd_create(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+
+    await state.clear()
+    await state.set_state(CreateClient.provider)
+    await message.answer("Выберите режим:", reply_markup=provider_kb("provider"))
+
+
+@dp.message(Command("clients"))
+@dp.message(F.text == BTN_CLIENTS)
+async def cmd_clients(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+
+    await state.clear()
+    keyboard = clients_inline_kb()
+
+    if keyboard is None:
+        await message.answer("Клиентов пока нет.", reply_markup=main_kb())
+        return
+
+    await message.answer("Клиенты:", reply_markup=keyboard)
+
+
+@dp.message(Command("backup"))
+@dp.message(F.text == BTN_BACKUP)
+async def cmd_backup(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+
+    await state.clear()
+    await message.answer("Создаю бэкап...")
+
+    try:
+        path = create_backup()
+        await message.answer_document(
+            FSInputFile(path),
+            caption=f"Бэкап Polka RTC\n{Path(path).name}",
+        )
+    except Exception as e:
+        await message.answer(
+            f"Ошибка бэкапа:\n\n<code>{str(e)}</code>",
+            parse_mode="HTML",
+        )
+
+
+@dp.message(Command("help"))
+@dp.message(F.text == BTN_HELP)
+async def cmd_help(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+
+    await state.clear()
+    await message.answer(help_text(), reply_markup=main_kb())
+
+
 @dp.callback_query(F.data == "help")
 async def cb_help(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await callback.message.answer(
-        "Режимы создания:\n\n"
-        "1. WB Stream — авто ID\n"
-        "   Бот запускает olcrtc -mode gen и сам получает Room ID.\n\n"
-        "2. WB Stream — ручной ID\n"
-        "   Вы заранее создаёте/берёте Room ID и вставляете его в бота.\n\n"
-        "3. Яндекс Телемост\n"
-        "   Вы заранее создаёте встречу и вставляете ID/ссылку.\n\n"
-        "Одно устройство = одна отдельная ссылка и один QR.\n"
-        "Если авто WB не подключается, используйте WB Stream — ручной ID."
-    )
+
+    await callback.message.answer(help_text(), reply_markup=main_kb())
     await callback.answer()
 
 
@@ -543,22 +646,14 @@ async def list_clients(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    rows = db_all()
-    if not rows:
+
+    keyboard = clients_inline_kb()
+    if keyboard is None:
         await callback.message.answer("Клиентов пока нет.", reply_markup=main_kb())
         await callback.answer()
         return
 
-    buttons = []
-    for row in rows:
-        active = is_active(row["client_id"])
-        status = "🟢" if active else "🔴"
-        provider_key = row["provider"] or row["carrier"]
-        provider_title = PROVIDERS.get(provider_key, {}).get("short", provider_key)
-        label = f"{status} {row['display_name']}-{row['device_no']} | {provider_title}"
-        buttons.append([InlineKeyboardButton(text=label[:60], callback_data=f"client:{row['client_id']}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
-    await callback.message.answer("Клиенты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.message.answer("Клиенты:", reply_markup=keyboard)
     await callback.answer()
 
 
@@ -769,6 +864,16 @@ async def menu(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def main() -> None:
     setup_db()
+
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Открыть меню"),
+        BotCommand(command="create", description="Создать клиента"),
+        BotCommand(command="clients", description="Список клиентов"),
+        BotCommand(command="backup", description="Создать бэкап"),
+        BotCommand(command="help", description="Помощь"),
+        BotCommand(command="cancel", description="Отменить действие"),
+    ])
+
     await dp.start_polling(bot)
 
 
