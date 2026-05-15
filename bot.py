@@ -35,6 +35,8 @@ DNS = os.getenv("DNS", "1.1.1.1:53")
 VP8_FPS = os.getenv("VP8_FPS", "60")
 VP8_BATCH = os.getenv("VP8_BATCH", "64")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "/var/backups/polka-rtc")
+OLCRTC_GENERATION = os.getenv("OLCRTC_GENERATION", "legacy").strip().lower()
+OLCRTC_URI_FORMAT = os.getenv("OLCRTC_URI_FORMAT", "legacy").strip().lower()
 
 CLIENT_ENV_DIR = Path("/etc/olcrtc/clients")
 
@@ -76,15 +78,23 @@ PROVIDERS = {
 }
 
 WB_TRANSPORTS = {
-    "datachannel": {
-        "title": "datachannel — максимальная скорость",
-        "short": "data",
-    },
     "vp8channel": {
-        "title": "vp8channel — высокая скорость",
+        "title": "vp8channel — рекомендуется для WB Stream",
         "short": "vp8",
+        "warning": "",
+    },
+    "datachannel": {
+        "title": "datachannel — экспериментально, нужны права canPublishData",
+        "short": "data",
+        "warning": "⚠️ WB Stream + datachannel сейчас часто не работает в обычном guest-режиме, если участникам не выданы права canPublishData. Рекомендуется vp8channel.",
     },
 }
+
+WB_AUTO_ID_WARNING = (
+    "⚠️ WB Stream сейчас может не создавать Room ID автоматически: "
+    "WB отключал авто-создание комнат и гостевой доступ. "
+    "Функция оставлена на случай, если её вернут. Надёжнее выбрать ручной ID."
+)
 
 
 BTN_CREATE = "➕ Создать клиента"
@@ -287,12 +297,56 @@ def generate_room_id(carrier: str) -> str:
 
 
 def make_uri(carrier: str, transport: str, room_id: str, auth_key: str, client_id: str) -> str:
+    if OLCRTC_URI_FORMAT == "refactor":
+        payload = ""
+        if transport == "vp8channel":
+            payload = f"<vp8-fps={VP8_FPS}&vp8-batch={VP8_BATCH}>"
+        return f"olcrtc://{carrier}?{transport}{payload}@{room_id}#{auth_key}$PolkaRTC"
     return f"olcrtc://{carrier}?{transport}@{room_id}#{auth_key}%{client_id}$PolkaRTC"
+
+
+def client_yaml_path(client_id: str) -> Path:
+    return CLIENT_ENV_DIR / f"{client_id}.yaml"
+
+
+def make_server_yaml(row: dict) -> str:
+    transport = row["transport"]
+    vp8_block = ""
+    if transport == "vp8channel":
+        vp8_block = f"""
+vp8:
+  fps: {int(VP8_FPS)}
+  batch_size: {int(VP8_BATCH)}
+"""
+    return f"""mode: srv
+link: direct
+
+auth:
+  provider: {row["carrier"]}
+
+room:
+  id: "{row["room_id"]}"
+
+crypto:
+  key: "{row["auth_key"]}"
+
+net:
+  transport: {transport}
+  dns: "{DNS}"
+
+socks:
+  proxy_addr: ""
+  proxy_port: 0
+{vp8_block}
+data: data
+debug: false
+"""
 
 
 def write_env(row: dict) -> None:
     CLIENT_ENV_DIR.mkdir(parents=True, exist_ok=True)
     env_path = CLIENT_ENV_DIR / f"{row['client_id']}.env"
+    yaml_path = client_yaml_path(row["client_id"])
 
     lines = [
         f"CARRIER={row['carrier']}",
@@ -301,6 +355,8 @@ def write_env(row: dict) -> None:
         f"CLIENT_ID={row['client_id']}",
         f"AUTH_KEY={row['auth_key']}",
         f"DNS={DNS}",
+        f"OLCRTC_GENERATION={OLCRTC_GENERATION}",
+        f"CONFIG_FILE={yaml_path}",
     ]
 
     if row["transport"] == "vp8channel":
@@ -309,6 +365,9 @@ def write_env(row: dict) -> None:
 
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     env_path.chmod(0o600)
+
+    yaml_path.write_text(make_server_yaml(row), encoding="utf-8")
+    yaml_path.chmod(0o600)
 
 
 def service_name(client_id: str) -> str:
@@ -362,6 +421,11 @@ def get_env_safe(client_id: str) -> str:
         else:
             safe_lines.append(line)
 
+    yaml_path = client_yaml_path(client_id)
+    if yaml_path.exists():
+        safe_lines.append("")
+        safe_lines.append("YAML_CONFIG=present")
+
     return "\n".join(safe_lines)
 
 
@@ -390,8 +454,8 @@ def main_kb() -> ReplyKeyboardMarkup:
 def provider_kb(prefix: str = "provider") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🟣 WB Stream", callback_data=f"{prefix}:wbstream")],
-            [InlineKeyboardButton(text="🟡 Яндекс Телемост", callback_data=f"{prefix}:telemost")],
+            [InlineKeyboardButton(text="🟡 Яндекс Телемост — стабильно", callback_data=f"{prefix}:telemost")],
+            [InlineKeyboardButton(text="🟣 WB Stream — ручной ID / экспериментально", callback_data=f"{prefix}:wbstream")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")],
         ]
     )
@@ -400,8 +464,8 @@ def provider_kb(prefix: str = "provider") -> InlineKeyboardMarkup:
 def wb_transport_kb(prefix: str = "wbtransport") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ datachannel — максимальная скорость", callback_data=f"{prefix}:datachannel")],
-            [InlineKeyboardButton(text="🎥 vp8channel — высокая скорость", callback_data=f"{prefix}:vp8channel")],
+            [InlineKeyboardButton(text="🎥 vp8channel — рекомендуется", callback_data=f"{prefix}:vp8channel")],
+            [InlineKeyboardButton(text="⚠️ datachannel — экспериментально", callback_data=f"{prefix}:datachannel")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="create")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
         ]
@@ -411,8 +475,8 @@ def wb_transport_kb(prefix: str = "wbtransport") -> InlineKeyboardMarkup:
 def wb_room_mode_kb(prefix: str = "wbroom") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🤖 Сгенерировать ID автоматически", callback_data=f"{prefix}:auto")],
-            [InlineKeyboardButton(text="✍️ Ввести ID вручную", callback_data=f"{prefix}:manual")],
+            [InlineKeyboardButton(text="✍️ Ввести ID вручную — рекомендуется", callback_data=f"{prefix}:manual")],
+            [InlineKeyboardButton(text="🤖 Авто-ID — может не работать", callback_data=f"{prefix}:auto")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="create")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
         ]
@@ -483,18 +547,18 @@ def confirm_delete_kb(client_id: str) -> InlineKeyboardMarkup:
 
 def help_text() -> str:
     return (
-        "Режимы создания:\n\n"
-        "1. WB Stream\n"
-        "   После выбора WB бот спросит transport:\n"
-        "   - datachannel — максимальная скорость\n"
-        "   - vp8channel — высокая скорость\n\n"
-        "   Затем бот спросит, как получить ID:\n"
-        "   - сгенерировать автоматически\n"
-        "   - ввести вручную\n\n"
-        "2. Яндекс Телемост\n"
-        "   Используется telemost + vp8channel.\n"
-        "   Нужно заранее создать встречу и вставить ID/ссылку.\n\n"
-        "Одно устройство = одна отдельная ссылка и один QR."
+        "Как работает Polka RTC:\n\n"
+        "• Одна ссылка рассчитана на одно устройство/одно подключение.\n"
+        "• Не передавайте одну ссылку двум людям: одновременно она может работать только у одного или конфликтовать.\n"
+        "• Если одному клиенту нужно несколько устройств — создайте ему несколько отдельных ссылок.\n\n"
+        "Рабочий основной режим:\n"
+        "1. Яндекс Телемост\n"
+        "   Используется telemost + vp8channel. Нужно заранее создать встречу и вставить ID/ссылку.\n\n"
+        "WB Stream:\n"
+        "2. WB Stream + vp8channel + ручной ID — основной вариант для тестов WB.\n"
+        "3. WB Stream + datachannel — экспериментально, обычно требует canPublishData.\n"
+        "4. WB Stream авто-ID оставлен на случай, если WB вернёт авто-создание комнат; сейчас может не работать.\n\n"
+        "Рекомендуемый сценарий сейчас: Telemost + отдельная ссылка на каждого клиента/устройство."
     )
 
 
@@ -520,7 +584,9 @@ def dashboard_text() -> str:
         f"🟡 Яндекс Телемост: {telemost_count}\n\n"
         "Транспорты:\n"
         f"⚡ datachannel: {data_count}\n"
-        f"🎥 vp8channel: {vp8_count}"
+        f"🎥 vp8channel: {vp8_count}\n\n"
+        f"Режим olcrtc: {OLCRTC_GENERATION}\n"
+        "Правило: 1 ссылка = 1 устройство."
     )
 
 
@@ -554,6 +620,7 @@ async def ask_room_id(message: Message, carrier: str) -> None:
     if carrier == "wbstream":
         await message.answer(
             "Отправьте ID WB Stream.\n\n"
+            "⚠️ Сейчас для WB Stream надёжнее использовать ручной ID: комнату нужно создать заранее на stream.wb.ru.\n\n"
             "Можно вставить только ID, например:\n"
             "<code>019e20e6-9f02-77db-a198-2e97a3278d89</code>\n\n"
             "Или вставить ссылку/текст, если ID в нём присутствует.",
@@ -563,7 +630,8 @@ async def ask_room_id(message: Message, carrier: str) -> None:
         await message.answer(
             "Отправьте ID/ссылку Яндекс Телемоста.\n\n"
             "Например:\n"
-            "<code>https://telemost.yandex.ru/j/220722504595729</code>",
+            "<code>https://telemost.yandex.ru/j/220722504595729</code>\n\n"
+            "Каждому человеку/устройству лучше выдавать отдельную ссылку Polka RTC.",
             parse_mode="HTML",
         )
 
@@ -586,6 +654,8 @@ async def create_device(
         if not room_id:
             raise RuntimeError("Не указан Room ID")
     elif room_mode == "auto":
+        if carrier == "wbstream":
+            await message.answer(WB_AUTO_ID_WARNING)
         room_id = generate_room_id(carrier)
     else:
         raise RuntimeError(f"Неизвестный режим Room ID: {room_mode}")
@@ -615,7 +685,8 @@ async def create_device(
         f"Устройство: <b>{device_no}</b>\n"
         f"Провайдер: <b>{provider['title']}</b>\n"
         f"Transport: <b>{transport}</b>\n"
-        f"Room ID: <code>{room_id}</code>",
+        f"Room ID: <code>{room_id}</code>\n\n"
+        "Важно: эта ссылка рассчитана на одно устройство. Для второго человека или второго устройства создайте новую ссылку.",
         parse_mode="HTML",
     )
     await send_uri(message, client_id, uri)
@@ -742,14 +813,17 @@ async def choose_provider(callback: CallbackQuery, state: FSMContext) -> None:
     if provider_key == "wbstream":
         await state.set_state(CreateClient.wb_transport)
         await callback.message.answer(
-            "WB Stream\n\nВыберите transport:",
+            "WB Stream — экспериментальный режим\n\n"
+            "Рекомендуется: vp8channel + ручной ID.\n"
+            "datachannel может не работать без прав canPublishData.\n\n"
+            "Выберите transport:",
             reply_markup=wb_transport_kb("wbtransport"),
         )
     else:
         await state.update_data(transport="vp8channel", room_mode="manual")
         await state.set_state(CreateClient.name)
         await callback.message.answer(
-            "Яндекс Телемост\n"
+            "Яндекс Телемост — основной стабильный режим\n"
             "Carrier: telemost\n"
             "Transport: vp8channel\n\n"
             "Введите имя клиента."
@@ -772,9 +846,14 @@ async def choose_wb_transport(callback: CallbackQuery, state: FSMContext) -> Non
     await state.update_data(transport=transport)
     await state.set_state(CreateClient.wb_room_mode)
 
+    warning = WB_TRANSPORTS.get(transport, {}).get("warning", "")
+    text = f"WB Stream\nTransport: {transport}\n\n"
+    if warning:
+        text += warning + "\n\n"
+    text += "Как получить ID звонка?"
+
     await callback.message.answer(
-        f"WB Stream\nTransport: {transport}\n\n"
-        "Как получить ID звонка?",
+        text,
         reply_markup=wb_room_mode_kb("wbroom"),
     )
     await callback.answer()
@@ -795,9 +874,11 @@ async def choose_wb_room_mode(callback: CallbackQuery, state: FSMContext) -> Non
     await state.set_state(CreateClient.name)
 
     mode_text = "автоматический ID" if room_mode == "auto" else "ручной ID"
-    await callback.message.answer(
-        f"WB Stream\nРежим: {mode_text}\n\nВведите имя клиента."
-    )
+    text = f"WB Stream\nРежим: {mode_text}\n\n"
+    if room_mode == "auto":
+        text += WB_AUTO_ID_WARNING + "\n\n"
+    text += "Введите имя клиента."
+    await callback.message.answer(text)
     await callback.answer()
 
 
@@ -953,7 +1034,10 @@ async def add_provider(callback: CallbackQuery, state: FSMContext) -> None:
     if provider_key == "wbstream":
         await state.set_state(AddDevice.wb_transport)
         await callback.message.answer(
-            "WB Stream\n\nВыберите transport:",
+            "WB Stream — экспериментальный режим\n\n"
+            "Рекомендуется: vp8channel + ручной ID.\n"
+            "datachannel может не работать без прав canPublishData.\n\n"
+            "Выберите transport:",
             reply_markup=wb_transport_kb("addwbtransport"),
         )
     else:
@@ -978,9 +1062,14 @@ async def add_wb_transport(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(transport=transport)
     await state.set_state(AddDevice.wb_room_mode)
 
+    warning = WB_TRANSPORTS.get(transport, {}).get("warning", "")
+    text = f"WB Stream\nTransport: {transport}\n\n"
+    if warning:
+        text += warning + "\n\n"
+    text += "Как получить ID звонка?"
+
     await callback.message.answer(
-        f"WB Stream\nTransport: {transport}\n\n"
-        "Как получить ID звонка?",
+        text,
         reply_markup=wb_room_mode_kb("addwbroom"),
     )
     await callback.answer()
@@ -1004,6 +1093,7 @@ async def add_wb_room_mode(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddDevice.room)
         await ask_room_id(callback.message, "wbstream")
     else:
+        await callback.message.answer(WB_AUTO_ID_WARNING)
         try:
             await create_device(
                 callback.message,

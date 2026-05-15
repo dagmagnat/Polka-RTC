@@ -1,41 +1,66 @@
 # Polka RTC
 
-Polka RTC — это Telegram-бот для управления отдельными клиентскими подключениями OlcRTC на VPS.
+Telegram-бот для управления отдельными подключениями OlcRTC на VPS.
 
 Репозиторий: `https://github.com/dagmagnat/polka-rtc`
 
+## Главное правило
+
+**1 ссылка = 1 устройство / 1 подключение.**
+
+Не давайте одну ссылку двум людям. Если одному клиенту нужно 2–3 устройства, создайте для него 2–3 отдельные ссылки через бота. Это надёжнее, чем пытаться использовать одну ссылку на всех.
+
 ## Что умеет бот
 
-- создавать клиента;
-- выдавать отдельную ссылку `olcrtc://...`;
+- создавать отдельную ссылку `olcrtc://...`;
 - выдавать QR-код;
-- создавать отдельный systemd-сервис на каждого клиента/устройство;
-- выбирать провайдера:
-  - `WB Stream`;
-  - `Яндекс Телемост`;
-- для `WB Stream` выбирать transport:
-  - `datachannel — максимальная скорость`;
-  - `vp8channel — высокая скорость`;
-- для `WB Stream` выбирать получение ID:
-  - автоматическая генерация;
-  - ручной ввод;
-- для `Яндекс Телемост` использовать ручной ввод ID/ссылки;
-- добавлять клиенту дополнительные устройства;
+- создавать отдельный systemd-сервис на каждое устройство;
 - показывать список клиентов;
-- показывать ссылку и QR повторно;
-- запускать, останавливать и перезапускать устройство;
+- повторно показывать ссылку и QR;
+- перезапускать, запускать и останавливать устройство;
 - показывать логи и диагностику;
-- удалять устройство клиента;
-- создавать бэкап и отправлять его в Telegram;
-- показывать постоянные кнопки внизу чата.
+- удалять устройство;
+- делать бэкап и отправлять его в Telegram.
 
-## Быстрая установка на новый VPS
+## Актуальные режимы
+
+### Яндекс Телемост
+
+Основной стабильный режим:
+
+```text
+telemost + vp8channel + ручной ID встречи
+```
+
+Вы заранее создаёте встречу Яндекс Телемост и вставляете ссылку или ID в бота.
+
+Пример:
+
+```text
+https://telemost.yandex.ru/j/220722504595729
+```
+
+### WB Stream
+
+WB Stream оставлен в боте, но сейчас он нестабилен.
+
+Рекомендуемый вариант для тестов:
+
+```text
+wbstream + vp8channel + ручной ID
+```
+
+`WB Stream авто-ID` оставлен только на случай, если WB вернёт авто-создание комнат. Сейчас авто-создание может не работать.
+
+`WB Stream + datachannel` оставлен как экспериментальный режим. Он может не работать без прав `canPublishData`.
+
+## Быстрая установка
 
 ```bash
 apt update && apt install -y git curl && rm -rf /root/polka-rtc && git clone https://github.com/dagmagnat/polka-rtc.git /root/polka-rtc && cd /root/polka-rtc && bash install.sh
 ```
 
-## Обновление уже установленного бота
+## Обновление установленного бота
 
 ```bash
 cd /root
@@ -45,20 +70,15 @@ cd /root/polka-rtc
 bash install.sh
 ```
 
-Если установщик увидит существующий `/etc/polka-rtc-bot.env`, он предложит:
+Если установщик увидит `/etc/polka-rtc-bot.env`, выберите:
 
 ```text
 1) Update bot files only
-2) Full install / reconfigure
 ```
 
-Для обычного обновления выбирайте:
+или просто нажмите Enter.
 
-```text
-1
-```
-
-## Что спрашивает установщик при полной установке
+## Что спрашивает установщик
 
 ```text
 Telegram BOT_TOKEN from @BotFather:
@@ -72,16 +92,12 @@ Install/update OlcRTC from source? [Y/n]:
 
 Токен берётся у `@BotFather`.
 
-Если бот уже создан:
-
 ```text
 @BotFather
 /mybots
 → выбрать бота
 → API Token
 ```
-
-Токен нельзя публиковать. Если токен попал в чужие руки, перевыпустите его через `@BotFather`.
 
 ## ADMIN_IDS
 
@@ -97,31 +113,9 @@ Install/update OlcRTC from source? [Y/n]:
 341361869,123456789
 ```
 
-Узнать свой Telegram ID можно через `@userinfobot` или `@RawDataBot`.
+Узнать Telegram ID можно через `@userinfobot` или `@RawDataBot`.
 
-## BOT_PROXY
-
-Обычно оставляется пустым.
-
-Проверка Telegram API:
-
-```bash
-curl -4 -m 15 https://api.telegram.org -I
-```
-
-Если команда даёт `timeout`, можно указать прокси:
-
-```text
-socks5://user:password@1.2.3.4:1080
-```
-
-или:
-
-```text
-http://user:password@1.2.3.4:8080
-```
-
-## Проверка после установки
+## Проверка
 
 ```bash
 systemctl status polka-rtc-bot --no-pager
@@ -134,27 +128,21 @@ journalctl -fu polka-rtc-bot
 /opt/olcrtc/bin/olcrtc -h | head
 ```
 
-Проверка генерации WB Stream ID:
-
-```bash
-/opt/olcrtc/bin/olcrtc -mode gen -carrier wbstream -dns 1.1.1.1:53 -amount 1 -data data
-```
-
-Список клиентских сервисов:
+Проверка сервисов клиентов:
 
 ```bash
 systemctl list-units 'olcrtc-client@*' --no-pager
 ```
 
-## Как пользоваться ботом
+## Использование
 
-Откройте своего Telegram-бота и отправьте:
+Откройте Telegram-бота и отправьте:
 
 ```text
 /start
 ```
 
-Постоянные кнопки снизу:
+Меню:
 
 ```text
 ➕ Создать клиента
@@ -163,68 +151,29 @@ systemctl list-units 'olcrtc-client@*' --no-pager
 ℹ️ Помощь
 ```
 
-Команды:
-
-```text
-/start
-/create
-/clients
-/backup
-/help
-/cancel
-```
-
-## Создание WB Stream
-
-Сценарий:
-
-```text
-➕ Создать клиента
-→ WB Stream
-→ datachannel или vp8channel
-→ сгенерировать ID автоматически или ввести ID вручную
-→ имя клиента
-```
-
-Если выбран ручной ID, вставьте ID WB Stream, например:
-
-```text
-019e20e6-9f02-77db-a198-2e97a3278d89
-```
-
-## Создание Яндекс Телемост
-
-Сценарий:
+### Создание Telemost-ссылки
 
 ```text
 ➕ Создать клиента
 → Яндекс Телемост
 → имя клиента
-→ вставить ссылку или ID встречи
+→ вставить ID/ссылку встречи
 ```
 
-Пример:
+### Создание WB Stream-ссылки
 
 ```text
-https://telemost.yandex.ru/j/220722504595729
+➕ Создать клиента
+→ WB Stream
+→ vp8channel — рекомендуется
+→ Ввести ID вручную — рекомендуется
+→ имя клиента
+→ вставить ID комнаты WB Stream
 ```
 
-Используется:
+## Несколько устройств у одного клиента
 
-```text
-carrier = telemost
-transport = vp8channel
-```
-
-## Логика клиентов и устройств
-
-По умолчанию создание клиента создаёт:
-
-```text
-1 клиент = 1 устройство = 1 ссылка = 1 QR
-```
-
-Если клиенту нужно второе устройство:
+Нажмите:
 
 ```text
 📋 Список клиентов
@@ -232,9 +181,9 @@ transport = vp8channel
 → ➕ Добавить устройство
 ```
 
-Для каждого устройства создаётся отдельная ссылка.
+Каждое устройство получит отдельную ссылку.
 
-## Где хранятся файлы
+## Файлы
 
 Бот:
 
@@ -242,13 +191,13 @@ transport = vp8channel
 /opt/polka-rtc-bot/
 ```
 
-Настройки бота:
+Настройки:
 
 ```text
 /etc/polka-rtc-bot.env
 ```
 
-База клиентов:
+База:
 
 ```text
 /var/lib/polka-rtc/polka.db
@@ -266,15 +215,36 @@ transport = vp8channel
 /var/backups/polka-rtc/
 ```
 
-Бинарник OlcRTC:
+## Новый режим olcrtc refactor/universal-carrier
+
+По умолчанию бот работает в старом режиме:
 
 ```text
-/opt/olcrtc/bin/olcrtc
+OLCRTC_GENERATION=legacy
+OLCRTC_URI_FORMAT=legacy
 ```
 
-## Как заменить Telegram API token бота
+В новой ветке `refactor/universal-carrier` старые CLI-флаги заменены YAML-конфигом. Бот уже создаёт YAML-файл для каждого клиента, но включать новый режим нужно только если вы точно установили новый бинарник:
 
-### Через nano
+```bash
+nano /etc/polka-rtc-bot.env
+```
+
+```text
+OLCRTC_GENERATION=refactor
+OLCRTC_URI_FORMAT=refactor
+```
+
+Потом:
+
+```bash
+systemctl restart polka-rtc-bot
+systemctl restart 'olcrtc-client@*'
+```
+
+Если не уверены — оставьте `legacy`.
+
+## Замена BOT_TOKEN
 
 ```bash
 nano /etc/polka-rtc-bot.env
@@ -282,144 +252,56 @@ nano /etc/polka-rtc-bot.env
 
 Замените:
 
-```bash
+```text
 BOT_TOKEN=старый_токен
 ```
 
 на:
 
-```bash
+```text
 BOT_TOKEN=новый_токен
 ```
 
-Перезапустите:
+Перезапуск:
 
 ```bash
 systemctl restart polka-rtc-bot
 systemctl status polka-rtc-bot --no-pager
 ```
 
-Проверка токена:
+## Замена или добавление администратора
 
 ```bash
-set -a
-source /etc/polka-rtc-bot.env
-set +a
-
-curl -4 -m 20 "https://api.telegram.org/bot${BOT_TOKEN}/getMe"
+nano /etc/polka-rtc-bot.env
 ```
 
-### Одной командой
+Один администратор:
 
-```bash
-read -rp "Введите новый BOT_TOKEN: " NEW_TOKEN
-python3 - <<PY
-from pathlib import Path
-
-env = Path("/etc/polka-rtc-bot.env")
-text = env.read_text()
-new_token = """$NEW_TOKEN""".strip()
-
-lines = []
-found = False
-
-for line in text.splitlines():
-    if line.startswith("BOT_TOKEN="):
-        lines.append(f"BOT_TOKEN={new_token}")
-        found = True
-    else:
-        lines.append(line)
-
-if not found:
-    lines.insert(0, f"BOT_TOKEN={new_token}")
-
-env.write_text("\\n".join(lines) + "\\n")
-PY
-
-chmod 600 /etc/polka-rtc-bot.env
-systemctl restart polka-rtc-bot
-systemctl status polka-rtc-bot --no-pager
+```text
+ADMIN_IDS=341361869
 ```
 
-## Как заменить или добавить администратора
+Несколько:
 
-### Заменить ADMIN_IDS
-
-```bash
-read -rp "Введите новый ADMIN_IDS: " NEW_ADMIN_IDS
-python3 - <<PY
-from pathlib import Path
-
-env = Path("/etc/polka-rtc-bot.env")
-text = env.read_text()
-new_admin_ids = """$NEW_ADMIN_IDS""".strip()
-
-lines = []
-found = False
-
-for line in text.splitlines():
-    if line.startswith("ADMIN_IDS="):
-        lines.append(f"ADMIN_IDS={new_admin_ids}")
-        found = True
-    else:
-        lines.append(line)
-
-if not found:
-    lines.insert(1, f"ADMIN_IDS={new_admin_ids}")
-
-env.write_text("\\n".join(lines) + "\\n")
-PY
-
-chmod 600 /etc/polka-rtc-bot.env
-systemctl restart polka-rtc-bot
-systemctl status polka-rtc-bot --no-pager
+```text
+ADMIN_IDS=341361869,123456789
 ```
 
-### Добавить администратора, не удаляя старых
+Перезапуск:
 
 ```bash
-read -rp "Введите Telegram ID нового администратора: " NEW_ADMIN_ID
-python3 - <<PY
-from pathlib import Path
-
-env = Path("/etc/polka-rtc-bot.env")
-text = env.read_text()
-new_id = """$NEW_ADMIN_ID""".strip()
-
-lines = []
-found = False
-
-for line in text.splitlines():
-    if line.startswith("ADMIN_IDS="):
-        current = line.split("=", 1)[1].strip()
-        ids = [x.strip() for x in current.split(",") if x.strip()]
-        if new_id not in ids:
-            ids.append(new_id)
-        lines.append("ADMIN_IDS=" + ",".join(ids))
-        found = True
-    else:
-        lines.append(line)
-
-if not found:
-    lines.insert(1, f"ADMIN_IDS={new_id}")
-
-env.write_text("\\n".join(lines) + "\\n")
-PY
-
-chmod 600 /etc/polka-rtc-bot.env
 systemctl restart polka-rtc-bot
-systemctl status polka-rtc-bot --no-pager
 ```
 
 ## Бэкап
 
-Создать бэкап через Telegram:
+Через Telegram:
 
 ```text
 💾 Создать бэкап
 ```
 
-Создать бэкап через консоль:
+Через консоль:
 
 ```bash
 polka-rtc-backup
@@ -431,25 +313,7 @@ polka-rtc-backup
 ls -lah /var/backups/polka-rtc/
 ```
 
-## Восстановление из бэкапа
-
-```bash
-tar -xzf polka-rtc-backup-YYYY-MM-DD_HH-MM-SS.tar.gz -C /
-systemctl daemon-reload
-systemctl restart polka-rtc-bot
-```
-
-## Полезные команды
-
-```bash
-systemctl status polka-rtc-bot --no-pager
-journalctl -fu polka-rtc-bot
-systemctl restart polka-rtc-bot
-systemctl list-units 'olcrtc-client@*' --no-pager
-journalctl -u olcrtc-client@CLIENT_ID.service -n 100 --no-pager
-```
-
-## Важно про безопасность
+## Важно
 
 Не публикуйте:
 
@@ -460,3 +324,5 @@ BOT_TOKEN
 auth_key клиентов
 olcrtc:// ссылки клиентов
 ```
+
+Если ссылка попала не тому человеку, создайте новую ссылку и удалите старое устройство.

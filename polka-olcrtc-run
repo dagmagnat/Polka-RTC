@@ -7,6 +7,12 @@ set -euo pipefail
 : "${CLIENT_ID:?CLIENT_ID is required}"
 : "${AUTH_KEY:?AUTH_KEY is required}"
 : "${DNS:=1.1.1.1:53}"
+: "${OLCRTC_GENERATION:=legacy}"
+
+if [[ "$OLCRTC_GENERATION" == "refactor" ]]; then
+  : "${CONFIG_FILE:?CONFIG_FILE is required for refactor mode}"
+  exec /opt/olcrtc/bin/olcrtc "$CONFIG_FILE"
+fi
 
 CMD=(
   /opt/olcrtc/bin/olcrtc

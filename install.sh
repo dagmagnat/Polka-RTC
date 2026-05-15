@@ -202,6 +202,11 @@ DNS=${DNS}
 VP8_FPS=60
 VP8_BATCH=64
 
+# legacy = old olcrtc CLI flags. refactor = new YAML config mode.
+# Leave legacy unless you intentionally installed the refactor/universal-carrier build.
+OLCRTC_GENERATION=legacy
+OLCRTC_URI_FORMAT=legacy
+
 BACKUP_DIR=/var/backups/polka-rtc
 EOF
 chmod 600 "$ENV_FILE"
