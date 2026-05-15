@@ -14,8 +14,11 @@ tar -czf "$OUT" \
   /etc/polka-rtc-bot.env \
   /etc/systemd/system/olcrtc-client@.service \
   /etc/systemd/system/polka-rtc-bot.service \
+  /etc/systemd/system/polka-rtc-watchdog.service \
+  /etc/systemd/system/polka-rtc-watchdog.timer \
   /usr/local/bin/polka-olcrtc-run \
-  /usr/local/bin/polka-rtc-backup
+  /usr/local/bin/polka-rtc-backup \
+  /usr/local/bin/polka-rtc-watchdog
 
 chmod 600 "$OUT"
 echo "$OUT"

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CLIENT_DIR="${CLIENT_DIR:-/etc/olcrtc/clients}"
+LOG_FILE="${WATCHDOG_LOG_FILE:-/var/log/polka-rtc-watchdog.log}"
+DEFAULT_AUTO_RESTART_MINUTES="${TELEMOST_AUTO_RESTART_MINUTES:-180}"
+DEFAULT_LOG_STALL_MINUTES="${TELEMOST_LOG_STALL_MINUTES:-0}"
+
+mkdir -p "$(dirname "$LOG_FILE")"
+
+log() {
+  echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"
+}
+
+restart_unit() {
+  local unit="$1"
+  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  systemctl restart "$unit" >/dev/null 2>&1 || true
+  log "restart $unit"
+}
+
+if [[ ! -d "$CLIENT_DIR" ]]; then
+  log "client dir not found: $CLIENT_DIR"
+  exit 0
+fi
+
+shopt -s nullglob
+for env_file in "$CLIENT_DIR"/*.env; do
+  client_id="$(basename "$env_file" .env)"
+  unit="olcrtc-client@${client_id}.service"
+
+  set +u
+  CARRIER=""
+  TELEMOST_STABLE_MODE=""
+  TELEMOST_AUTO_RESTART_MINUTES=""
+  TELEMOST_LOG_STALL_MINUTES=""
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set -u
+
+  active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+  if [[ "$active" == "failed" || "$active" == "inactive" || "$active" == "deactivating" ]]; then
+    log "$unit state=$active -> restart"
+    restart_unit "$unit"
+    continue
+  fi
+
+  if [[ "$CARRIER" != "telemost" || "${TELEMOST_STABLE_MODE:-1}" == "0" ]]; then
+    continue
+  fi
+
+  auto_minutes="${TELEMOST_AUTO_RESTART_MINUTES:-$DEFAULT_AUTO_RESTART_MINUTES}"
+  stall_minutes="${TELEMOST_LOG_STALL_MINUTES:-$DEFAULT_LOG_STALL_MINUTES}"
+
+  if [[ "$auto_minutes" =~ ^[0-9]+$ && "$auto_minutes" -gt 0 ]]; then
+    pid="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || echo 0)"
+    if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]]; then
+      etimes="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)"
+      if [[ "$etimes" =~ ^[0-9]+$ && "$etimes" -gt $((auto_minutes * 60)) ]]; then
+        log "$unit uptime=${etimes}s > ${auto_minutes}m -> stable restart"
+        restart_unit "$unit"
+        continue
+      fi
+    fi
+  fi
+
+  # Optional. Disabled by default because some olcrtc builds are quiet while healthy.
+  if [[ "$stall_minutes" =~ ^[0-9]+$ && "$stall_minutes" -gt 0 ]]; then
+    recent="$(journalctl -u "$unit" --since "${stall_minutes} minutes ago" --no-pager 2>/dev/null || true)"
+    if ! echo "$recent" | grep -Eiq 'connected|link|state|publisher|subscriber|packet|bytes|room|ice|webrtc|telemost'; then
+      log "$unit no recent activity markers for ${stall_minutes}m -> restart"
+      restart_unit "$unit"
+      continue
+    fi
+  fi
+done

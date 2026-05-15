@@ -326,3 +326,50 @@ olcrtc:// ссылки клиентов
 ```
 
 Если ссылка попала не тому человеку, создайте новую ссылку и удалите старое устройство.
+
+
+## Telemost Stable Mode
+
+В этой сборке добавлен режим повышения стабильности для Яндекс Телемоста.
+
+Что делает режим:
+
+```text
+1. systemd перезапускает упавшие olcrtc-клиенты без лимита попыток.
+2. watchdog каждые 3 минуты проверяет клиентские сервисы.
+3. Если Telemost-сервис упал или ушёл в failed/inactive — watchdog перезапускает его.
+4. Если Telemost-сессия работает слишком долго, watchdog делает stable restart.
+5. В карточке клиента есть кнопка ♻️ Stable restart.
+```
+
+Настройки находятся в `/etc/polka-rtc-bot.env`:
+
+```bash
+TELEMOST_STABLE_MODE=1
+TELEMOST_AUTO_RESTART_MINUTES=180
+TELEMOST_LOG_STALL_MINUTES=0
+```
+
+`TELEMOST_AUTO_RESTART_MINUTES=180` означает плановый restart Telemost-процесса примерно раз в 3 часа. Если не хотите плановый restart, поставьте:
+
+```bash
+TELEMOST_AUTO_RESTART_MINUTES=0
+```
+
+После изменения:
+
+```bash
+systemctl restart polka-rtc-bot
+systemctl restart polka-rtc-watchdog.timer
+```
+
+Проверка watchdog:
+
+```bash
+systemctl status polka-rtc-watchdog.timer --no-pager
+journalctl -u polka-rtc-watchdog.service -n 100 --no-pager
+tail -n 100 /var/log/polka-rtc-watchdog.log
+```
+
+Важно: одна ссылка всё равно рассчитана на одно устройство/одно подключение. Для второго устройства создавайте отдельную ссылку.
+

@@ -54,7 +54,8 @@ install_bot_files() {
   cp -f ./requirements.txt "$APP_DIR/requirements.txt"
   cp -f ./polka-olcrtc-run /usr/local/bin/polka-olcrtc-run
   cp -f ./polka-rtc-backup /usr/local/bin/polka-rtc-backup
-  chmod +x /usr/local/bin/polka-olcrtc-run /usr/local/bin/polka-rtc-backup
+  cp -f ./polka-rtc-watchdog /usr/local/bin/polka-rtc-watchdog
+  chmod +x /usr/local/bin/polka-olcrtc-run /usr/local/bin/polka-rtc-backup /usr/local/bin/polka-rtc-watchdog
 
   echo
   echo "Creating/updating Python venv..."
@@ -75,10 +76,40 @@ Type=simple
 EnvironmentFile=/etc/olcrtc/clients/%i.env
 ExecStart=/usr/local/bin/polka-olcrtc-run
 Restart=always
-RestartSec=5
+RestartSec=3
+StartLimitIntervalSec=0
+StartLimitBurst=0
+KillSignal=SIGTERM
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/polka-rtc-watchdog.service <<'EOF'
+[Unit]
+Description=Polka RTC Telemost stability watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/polka-rtc-bot.env
+ExecStart=/usr/local/bin/polka-rtc-watchdog
+EOF
+
+  cat > /etc/systemd/system/polka-rtc-watchdog.timer <<'EOF'
+[Unit]
+Description=Run Polka RTC watchdog every 3 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
 EOF
 
   cat > /etc/systemd/system/polka-rtc-bot.service <<'EOF'
@@ -120,7 +151,9 @@ if [[ "$INSTALL_MODE" == "1" ]]; then
   echo
   echo "Restarting bot..."
   systemctl enable --now polka-rtc-bot
+  systemctl enable --now polka-rtc-watchdog.timer
   systemctl restart polka-rtc-bot
+  systemctl restart polka-rtc-watchdog.timer
 
   echo
   echo "=== Updated ==="
@@ -202,6 +235,14 @@ DNS=${DNS}
 VP8_FPS=60
 VP8_BATCH=64
 
+# Telemost stability mode.
+# 0 disables stable fields for new Telemost clients.
+TELEMOST_STABLE_MODE=1
+# 0 disables periodic restart. Recommended range: 120-360.
+TELEMOST_AUTO_RESTART_MINUTES=180
+# Disabled by default because some healthy olcrtc builds are quiet.
+TELEMOST_LOG_STALL_MINUTES=0
+
 # legacy = old olcrtc CLI flags. refactor = new YAML config mode.
 # Leave legacy unless you intentionally installed the refactor/universal-carrier build.
 OLCRTC_GENERATION=legacy
@@ -222,7 +263,9 @@ set +a
 echo
 echo "Starting bot..."
 systemctl enable --now polka-rtc-bot
+systemctl enable --now polka-rtc-watchdog.timer
 systemctl restart polka-rtc-bot
+systemctl restart polka-rtc-watchdog.timer
 
 echo
 echo "=== Installed ==="

@@ -38,6 +38,10 @@ BACKUP_DIR = os.getenv("BACKUP_DIR", "/var/backups/polka-rtc")
 OLCRTC_GENERATION = os.getenv("OLCRTC_GENERATION", "legacy").strip().lower()
 OLCRTC_URI_FORMAT = os.getenv("OLCRTC_URI_FORMAT", "legacy").strip().lower()
 
+TELEMOST_STABLE_MODE = os.getenv("TELEMOST_STABLE_MODE", "1").strip() != "0"
+TELEMOST_AUTO_RESTART_MINUTES = os.getenv("TELEMOST_AUTO_RESTART_MINUTES", "180").strip() or "180"
+TELEMOST_LOG_STALL_MINUTES = os.getenv("TELEMOST_LOG_STALL_MINUTES", "0").strip() or "0"
+
 CLIENT_ENV_DIR = Path("/etc/olcrtc/clients")
 
 if BOT_PROXY:
@@ -359,6 +363,11 @@ def write_env(row: dict) -> None:
         f"CONFIG_FILE={yaml_path}",
     ]
 
+    if row["carrier"] == "telemost":
+        lines.append(f"TELEMOST_STABLE_MODE={'1' if TELEMOST_STABLE_MODE else '0'}")
+        lines.append(f"TELEMOST_AUTO_RESTART_MINUTES={TELEMOST_AUTO_RESTART_MINUTES}")
+        lines.append(f"TELEMOST_LOG_STALL_MINUTES={TELEMOST_LOG_STALL_MINUTES}")
+
     if row["transport"] == "vp8channel":
         lines.append(f"VP8_FPS={VP8_FPS}")
         lines.append(f"VP8_BATCH={VP8_BATCH}")
@@ -386,6 +395,67 @@ def stop_service(client_id: str) -> None:
 
 def restart_service(client_id: str) -> None:
     run_cmd(["systemctl", "restart", service_name(client_id)], timeout=60)
+
+
+def reset_failed_service(client_id: str) -> None:
+    subprocess.run(["systemctl", "reset-failed", service_name(client_id)], text=True)
+
+
+def stable_restart_service(client_id: str) -> None:
+    reset_failed_service(client_id)
+    restart_service(client_id)
+
+
+def service_main_pid(client_id: str) -> str:
+    result = subprocess.run(
+        ["systemctl", "show", service_name(client_id), "-p", "MainPID", "--value"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def service_uptime_text(client_id: str) -> str:
+    pid = service_main_pid(client_id)
+    if not pid or pid == "0":
+        return "нет активного процесса"
+
+    result = subprocess.run(
+        ["ps", "-o", "etimes=", "-p", pid],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        seconds = int(result.stdout.strip())
+    except Exception:
+        return "неизвестно"
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours} ч {minutes} мин"
+
+
+def watchdog_status_text() -> str:
+    timer_result = subprocess.run(
+        ["systemctl", "is-active", "polka-rtc-watchdog.timer"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    timer = timer_result.stdout.strip() or "unknown"
+
+    service_result = subprocess.run(
+        ["systemctl", "is-active", "polka-rtc-watchdog.service"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    service = service_result.stdout.strip() or "unknown"
+
+    return f"timer={timer}, service={service}"
 
 
 def is_active(client_id: str) -> bool:
@@ -526,6 +596,7 @@ def client_kb(client_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📷 QR", callback_data=f"qr:{client_id}")],
             [InlineKeyboardButton(text="➕ Добавить устройство", callback_data=f"add:{client_id}")],
             [InlineKeyboardButton(text="🔄 Перезапустить", callback_data=f"restart:{client_id}")],
+            [InlineKeyboardButton(text="♻️ Stable restart", callback_data=f"stable_restart:{client_id}")],
             start_stop_row,
             [InlineKeyboardButton(text="🧪 Диагностика", callback_data=f"diag:{client_id}")],
             [InlineKeyboardButton(text="📜 Логи", callback_data=f"logs:{client_id}")],
@@ -558,7 +629,11 @@ def help_text() -> str:
         "2. WB Stream + vp8channel + ручной ID — основной вариант для тестов WB.\n"
         "3. WB Stream + datachannel — экспериментально, обычно требует canPublishData.\n"
         "4. WB Stream авто-ID оставлен на случай, если WB вернёт авто-создание комнат; сейчас может не работать.\n\n"
-        "Рекомендуемый сценарий сейчас: Telemost + отдельная ссылка на каждого клиента/устройство."
+        "Рекомендуемый сценарий сейчас: Telemost + отдельная ссылка на каждого клиента/устройство.\n\n"
+        "Стабильность Telemost:\n"
+        "• systemd автоматически перезапускает упавшие подключения;\n"
+        "• watchdog проверяет сервисы и перезапускает зависшие/слишком долгие Telemost-сессии;\n"
+        "• кнопка ♻️ Stable restart вручную сбрасывает Telemost-подключение."
     )
 
 
@@ -586,6 +661,8 @@ def dashboard_text() -> str:
         f"⚡ datachannel: {data_count}\n"
         f"🎥 vp8channel: {vp8_count}\n\n"
         f"Режим olcrtc: {OLCRTC_GENERATION}\n"
+        f"Telemost stable: {'on' if TELEMOST_STABLE_MODE else 'off'} / auto-restart {TELEMOST_AUTO_RESTART_MINUTES} мин\n"
+        f"Watchdog: {watchdog_status_text()}\n"
         "Правило: 1 ссылка = 1 устройство."
     )
 
@@ -1184,6 +1261,26 @@ async def restart_client(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("stable_restart:"))
+async def stable_restart_client(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+
+    try:
+        stable_restart_service(client_id)
+        await callback.message.answer(
+            f"Stable restart выполнен: {client_id}\n"
+            "Если Telemost подвисал, подождите 10–20 секунд и обновите подключение на клиенте."
+        )
+    except Exception as e:
+        await callback.message.answer(f"Ошибка stable restart:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("stop:"))
 async def stop_client(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -1227,7 +1324,9 @@ async def diagnostics(callback: CallbackQuery) -> None:
 
     await callback.message.answer(
         f"Диагностика {client_id}\n\n"
-        f"Статус: {'active' if active else 'inactive'}\n\n"
+        f"Статус: {'active' if active else 'inactive'}\n"
+        f"Uptime: {service_uptime_text(client_id)}\n"
+        f"Watchdog: {watchdog_status_text()}\n\n"
         f"ENV:\n<code>{env_safe}</code>\n\n"
         f"LOGS:\n<code>{logs}</code>",
         parse_mode="HTML",
