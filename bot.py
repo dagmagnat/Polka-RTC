@@ -29,6 +29,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_PROXY = os.getenv("BOT_PROXY", "").strip()
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 
+APP_VERSION = "telemost-only-safe-2026-05-15-2"
+
 OLCRTC_BIN = os.getenv("OLCRTC_BIN", "/opt/olcrtc/bin/olcrtc")
 DB_PATH = os.getenv("DB_PATH", "/var/lib/polka-rtc/polka.db")
 DNS = os.getenv("DNS", "1.1.1.1:53")
@@ -670,6 +672,7 @@ def dashboard_text() -> str:
     return (
         "Polka RTC\n\n"
         "📊 Дашборд\n"
+        f"Версия: {APP_VERSION}\n"
         f"Всего устройств: {data['total']}\n"
         f"🟢 Работают: {data['active']}\n"
         f"🔴 Остановлены: {data['stopped']}\n\n"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL="${POLKA_RTC_REPO_URL:-https://github.com/dagmagnat/polka-rtc.git}"
 
-if [[ ! -f "./bot.py" || ! -f "./requirements.txt" || ! -f "./polka-olcrtc-run" || ! -f "./polka-rtc-backup" ]]; then
+if [[ ! -f "./bot.py" || ! -f "./requirements.txt" || ! -f "./polka-olcrtc-run" || ! -f "./polka-rtc-backup" || ! -f "./polka-rtc-watchdog" ]]; then
   echo "Full project files not found near install.sh."
   echo "Cloning full Polka RTC project from: ${REPO_URL}"
 
@@ -33,12 +33,22 @@ fi
 echo "=== Polka RTC installer ==="
 echo
 
+FORCE_UPDATE=0
+if [[ "${1:-}" == "--update" || "${1:-}" == "update" ]]; then
+  FORCE_UPDATE=1
+fi
+
 if [[ -f "$ENV_FILE" ]]; then
   echo "Existing installation detected: $ENV_FILE"
-  echo "1) Update bot files only"
-  echo "2) Full install / reconfigure"
-  read -rp "Choose mode [1/2, default 1]: " INSTALL_MODE
-  INSTALL_MODE="${INSTALL_MODE:-1}"
+  if [[ "${FORCE_UPDATE:-0}" == "1" ]]; then
+    INSTALL_MODE="1"
+    echo "Forced update mode selected."
+  else
+    echo "1) Update bot files only"
+    echo "2) Full install / reconfigure"
+    read -rp "Choose mode [1/2, default 1]: " INSTALL_MODE
+    INSTALL_MODE="${INSTALL_MODE:-1}"
+  fi
 else
   INSTALL_MODE="2"
 fi
@@ -131,6 +141,43 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
+}
+
+
+disable_telemost_periodic_restart() {
+  # Safety migration: do not restart active Telemost calls by timer.
+  if [ -f "$ENV_FILE" ]; then
+    if grep -q '^TELEMOST_AUTO_RESTART_MINUTES=' "$ENV_FILE"; then
+      sed -i 's/^TELEMOST_AUTO_RESTART_MINUTES=.*/TELEMOST_AUTO_RESTART_MINUTES=0/' "$ENV_FILE"
+    else
+      echo 'TELEMOST_AUTO_RESTART_MINUTES=0' >> "$ENV_FILE"
+    fi
+
+    if grep -q '^TELEMOST_LOG_STALL_MINUTES=' "$ENV_FILE"; then
+      sed -i 's/^TELEMOST_LOG_STALL_MINUTES=.*/TELEMOST_LOG_STALL_MINUTES=0/' "$ENV_FILE"
+    else
+      echo 'TELEMOST_LOG_STALL_MINUTES=0' >> "$ENV_FILE"
+    fi
+  fi
+
+  if [ -d /etc/olcrtc/clients ]; then
+    for f in /etc/olcrtc/clients/*.env; do
+      [ -f "$f" ] || continue
+      grep -q '^CARRIER=telemost' "$f" || continue
+
+      if grep -q '^TELEMOST_AUTO_RESTART_MINUTES=' "$f"; then
+        sed -i 's/^TELEMOST_AUTO_RESTART_MINUTES=.*/TELEMOST_AUTO_RESTART_MINUTES=0/' "$f"
+      else
+        echo 'TELEMOST_AUTO_RESTART_MINUTES=0' >> "$f"
+      fi
+
+      if grep -q '^TELEMOST_LOG_STALL_MINUTES=' "$f"; then
+        sed -i 's/^TELEMOST_LOG_STALL_MINUTES=.*/TELEMOST_LOG_STALL_MINUTES=0/' "$f"
+      else
+        echo 'TELEMOST_LOG_STALL_MINUTES=0' >> "$f"
+      fi
+    done
+  fi
 }
 
 if [[ "$INSTALL_MODE" == "1" ]]; then

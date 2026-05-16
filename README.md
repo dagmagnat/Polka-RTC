@@ -42,17 +42,16 @@ https://telemost.yandex.ru/j/220722504595729
 
 ### WB Stream
 
-WB Stream оставлен в боте, но сейчас он нестабилен.
+WB Stream сейчас временно отключён для создания клиентов.
 
-Рекомендуемый вариант для тестов:
+Причина: при проверке WB Stream возвращал `502 Bad Gateway` и не запускался ни через `datachannel`, ни через `vp8channel`.
+
+В боте кнопка WB Stream оставлена только как информационная. Основной рабочий режим сейчас:
 
 ```text
-wbstream + vp8channel + ручной ID
+Яндекс Телемост + vp8channel + ручной ID встречи
 ```
 
-`WB Stream авто-ID` оставлен только на случай, если WB вернёт авто-создание комнат. Сейчас авто-создание может не работать.
-
-`WB Stream + datachannel` оставлен как экспериментальный режим. Он может не работать без прав `canPublishData`.
 
 ## Быстрая установка
 
@@ -62,21 +61,39 @@ apt update && apt install -y git curl && rm -rf /root/polka-rtc && git clone htt
 
 ## Обновление установленного бота
 
+### Вариант 1 — одной командой из GitHub
+
+```bash
+apt update && apt install -y git curl ca-certificates
+bash <(curl -fsSL https://raw.githubusercontent.com/dagmagnat/polka-rtc/main/install.sh) --update
+```
+
+Установщик сам скачает полный репозиторий, обновит файлы в `/opt/polka-rtc-bot`, обновит systemd-шаблоны и перезапустит бота.
+
+### Вариант 2 — через локальный клон
+
 ```bash
 cd /root
 rm -rf /root/polka-rtc
 git clone https://github.com/dagmagnat/polka-rtc.git /root/polka-rtc
 cd /root/polka-rtc
-bash install.sh
+bash install.sh --update
 ```
 
-Если установщик увидит `/etc/polka-rtc-bot.env`, выберите:
+### Проверка, что обновление реально применилось
+
+```bash
+grep -E 'APP_VERSION|WB_STREAM_DOWN_MESSAGE' /opt/polka-rtc-bot/bot.py
+systemctl status polka-rtc-bot --no-pager
+journalctl -u polka-rtc-bot -n 80 --no-pager
+```
+
+В боте в дашборде должна появиться версия:
 
 ```text
-1) Update bot files only
+telemost-only-safe-2026-05-15-2
 ```
 
-или просто нажмите Enter.
 
 ## Что спрашивает установщик
 
