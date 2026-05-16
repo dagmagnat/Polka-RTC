@@ -110,11 +110,11 @@ EOF
 
   cat > /etc/systemd/system/polka-rtc-watchdog.timer <<'EOF'
 [Unit]
-Description=Run Polka RTC watchdog every 3 minutes
+Description=Run Polka RTC watchdog every 1 minute
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=3min
+OnBootSec=1min
+OnUnitActiveSec=1min
 AccuracySec=30s
 Persistent=true
 
@@ -175,6 +175,16 @@ disable_telemost_periodic_restart() {
         sed -i 's/^TELEMOST_LOG_STALL_MINUTES=.*/TELEMOST_LOG_STALL_MINUTES=0/' "$f"
       else
         echo 'TELEMOST_LOG_STALL_MINUTES=0' >> "$f"
+      fi
+
+      if ! grep -q '^TELEMOST_AUTO_RECOVERY=' "$f"; then
+        echo 'TELEMOST_AUTO_RECOVERY=0' >> "$f"
+      fi
+
+      if grep -q '^TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=' "$f"; then
+        sed -i 's/^TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=.*/TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=5/' "$f"
+      else
+        echo 'TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=5' >> "$f"
       fi
     done
   fi

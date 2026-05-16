@@ -29,7 +29,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_PROXY = os.getenv("BOT_PROXY", "").strip()
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 
-APP_VERSION = "telemost-only-safe-2026-05-15-2"
+APP_VERSION = "telemost-auto-recovery-2026-05-15-3"
 
 OLCRTC_BIN = os.getenv("OLCRTC_BIN", "/opt/olcrtc/bin/olcrtc")
 DB_PATH = os.getenv("DB_PATH", "/var/lib/polka-rtc/polka.db")
@@ -43,6 +43,7 @@ OLCRTC_URI_FORMAT = os.getenv("OLCRTC_URI_FORMAT", "legacy").strip().lower()
 TELEMOST_STABLE_MODE = os.getenv("TELEMOST_STABLE_MODE", "1").strip() != "0"
 TELEMOST_AUTO_RESTART_MINUTES = os.getenv("TELEMOST_AUTO_RESTART_MINUTES", "0").strip() or "0"
 TELEMOST_LOG_STALL_MINUTES = os.getenv("TELEMOST_LOG_STALL_MINUTES", "0").strip() or "0"
+TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES = os.getenv("TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES", "5").strip() or "5"
 
 CLIENT_ENV_DIR = Path("/etc/olcrtc/clients")
 
@@ -377,6 +378,8 @@ def write_env(row: dict) -> None:
         lines.append(f"TELEMOST_STABLE_MODE={'1' if TELEMOST_STABLE_MODE else '0'}")
         lines.append(f"TELEMOST_AUTO_RESTART_MINUTES={TELEMOST_AUTO_RESTART_MINUTES}")
         lines.append(f"TELEMOST_LOG_STALL_MINUTES={TELEMOST_LOG_STALL_MINUTES}")
+        lines.append("TELEMOST_AUTO_RECOVERY=0")
+        lines.append(f"TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES={TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES}")
 
     if row["transport"] == "vp8channel":
         lines.append(f"VP8_FPS={VP8_FPS}")
@@ -519,6 +522,57 @@ def get_env_safe(client_id: str) -> str:
     return "\n".join(safe_lines)
 
 
+def client_env_path(client_id: str) -> Path:
+    return CLIENT_ENV_DIR / f"{client_id}.env"
+
+
+def read_client_env(client_id: str) -> dict[str, str]:
+    env_path = client_env_path(client_id)
+    values: dict[str, str] = {}
+
+    if not env_path.exists():
+        return values
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+
+    return values
+
+
+def get_client_env_value(client_id: str, key: str, default: str = "") -> str:
+    return read_client_env(client_id).get(key, default)
+
+
+def set_client_env_value(client_id: str, key: str, value: str) -> None:
+    env_path = client_env_path(client_id)
+    if not env_path.exists():
+        raise FileNotFoundError(f"env-файл не найден: {env_path}")
+
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    found = False
+    new_lines = []
+
+    for line in lines:
+        if line.startswith(f"{key}="):
+            new_lines.append(f"{key}={value}")
+            found = True
+        else:
+            new_lines.append(line)
+
+    if not found:
+        new_lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    env_path.chmod(0o600)
+
+
+def is_auto_recovery_enabled(client_id: str) -> bool:
+    return get_client_env_value(client_id, "TELEMOST_AUTO_RECOVERY", "0") == "1"
+
+
 def create_backup() -> str:
     result = run_cmd(["/usr/local/bin/polka-rtc-backup"], timeout=120)
     path = result.stdout.strip().splitlines()[-1]
@@ -617,6 +671,10 @@ def client_kb(client_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="➕ Добавить устройство", callback_data=f"add:{client_id}")],
             [InlineKeyboardButton(text="🔄 Перезапустить", callback_data=f"restart:{client_id}")],
             [InlineKeyboardButton(text="♻️ Stable restart", callback_data=f"stable_restart:{client_id}")],
+            [InlineKeyboardButton(
+                text=("🛟 Автовосст. 5м: ВКЛ" if is_auto_recovery_enabled(client_id) else "🛟 Автовосст. 5м: ВЫКЛ"),
+                callback_data=f"autorec:{client_id}",
+            )],
             start_stop_row,
             [InlineKeyboardButton(text="🧪 Диагностика", callback_data=f"diag:{client_id}")],
             [InlineKeyboardButton(text="📜 Логи", callback_data=f"logs:{client_id}")],
@@ -654,7 +712,8 @@ def help_text() -> str:
         "• watchdog перезапускает только failed/inactive enabled сервисы;\n"
         "• active-сессии не перезапускаются автоматически;\n"
         "• кнопка ♻️ Stable restart вручную сбрасывает Telemost-подключение;\n"
-        "• если клиент после Stop/Start не возвращается, нажмите ♻️ Stable restart и затем Start в приложении."
+        "• если клиент после Stop/Start не возвращается, нажмите ♻️ Stable restart и затем Start в приложении;\n"
+        "• 🛟 Автовосст. 5м можно включить для конкретного клиента — бот будет сам делать Stable restart примерно раз в 5 минут. Это жёсткий режим и может кратко рвать активное соединение."
     )
 
 
@@ -1288,6 +1347,41 @@ async def restart_client(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("autorec:"))
+async def toggle_auto_recovery(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+    row = db_get(client_id)
+
+    if not row:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+
+    if row["carrier"] != "telemost":
+        await callback.answer("Автовосстановление доступно только для Telemost", show_alert=True)
+        return
+
+    try:
+        enabled = is_auto_recovery_enabled(client_id)
+        new_value = "0" if enabled else "1"
+        set_client_env_value(client_id, "TELEMOST_AUTO_RECOVERY", new_value)
+        set_client_env_value(client_id, "TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES", "5")
+
+        status = "включено" if new_value == "1" else "выключено"
+        await callback.message.answer(
+            f"🛟 Автовосстановление для {client_id}: {status}\n\n"
+            "Если включено, watchdog будет делать Stable restart этого клиента примерно раз в 5 минут. "
+            "Это помогает, когда клиент после Stop/Start не возвращается, но может кратко прерывать активную сессию."
+        )
+    except Exception as e:
+        await callback.message.answer(f"Ошибка изменения автовосстановления:\n\n<code>{str(e)}</code>", parse_mode="HTML")
+
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("stable_restart:"))
 async def stable_restart_client(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -1300,7 +1394,8 @@ async def stable_restart_client(callback: CallbackQuery) -> None:
         stable_restart_service(client_id)
         await callback.message.answer(
             f"Stable restart выполнен: {client_id}\n"
-            "Если Telemost подвисал, подождите 10–20 секунд, затем в приложении клиента нажмите Stop → Start."
+            "Если Telemost подвисал, подождите 10–20 секунд, затем в приложении клиента нажмите Stop → Start. "
+            "Для автоматического повтора можно включить 🛟 Автовосст. 5м в карточке клиента."
         )
     except Exception as e:
         await callback.message.answer(f"Ошибка stable restart:\n\n<code>{str(e)}</code>", parse_mode="HTML")
@@ -1354,7 +1449,8 @@ async def diagnostics(callback: CallbackQuery) -> None:
         f"Статус: {'active' if active else 'inactive'}\n"
         f"Enabled: {'yes' if is_enabled(client_id) else 'no'}\n"
         f"Uptime: {service_uptime_text(client_id)}\n"
-        f"Watchdog: {watchdog_status_text()}\n\n"
+        f"Watchdog: {watchdog_status_text()}\n"
+        f"Auto recovery 5m: {'on' if is_auto_recovery_enabled(client_id) else 'off'}\n\n"
         f"ENV:\n<code>{env_safe}</code>\n\n"
         f"LOGS:\n<code>{logs}</code>",
         parse_mode="HTML",
