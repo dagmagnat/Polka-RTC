@@ -94,6 +94,14 @@ WB_TRANSPORTS = {
     },
 }
 
+WB_STREAM_DOWN_MESSAGE = (
+    "🟣 WB Stream сейчас временно отключён для создания клиентов.\n\n"
+    "По логам он возвращает 502 Bad Gateway и не запускается ни через datachannel, ни через vp8channel.\n"
+    "Кнопка оставлена только как информационная, чтобы не забыть про метод, если WB снова заработает.\n\n"
+    "Рабочий основной режим сейчас:\n"
+    "🟡 Яндекс Телемост + vp8channel + ручной ID встречи."
+)
+
 WB_AUTO_ID_WARNING = (
     "⚠️ WB Stream сейчас может не создавать Room ID автоматически: "
     "WB отключал авто-создание комнат и гостевой доступ. "
@@ -535,7 +543,7 @@ def provider_kb(prefix: str = "provider") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🟡 Яндекс Телемост — стабильно", callback_data=f"{prefix}:telemost")],
-            [InlineKeyboardButton(text="🟣 WB Stream — ручной ID / экспериментально", callback_data=f"{prefix}:wbstream")],
+            [InlineKeyboardButton(text="🟣 WB Stream — временно не работает", callback_data="wb_info")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")],
         ]
     )
@@ -636,15 +644,15 @@ def help_text() -> str:
         "1. Яндекс Телемост\n"
         "   Используется telemost + vp8channel. Нужно заранее создать встречу и вставить ID/ссылку.\n\n"
         "WB Stream:\n"
-        "2. WB Stream + vp8channel + ручной ID — основной вариант для тестов WB.\n"
-        "3. WB Stream + datachannel — экспериментально, обычно требует canPublishData.\n"
-        "4. WB Stream авто-ID оставлен на случай, если WB вернёт авто-создание комнат; сейчас может не работать.\n\n"
+        "2. Сейчас временно отключён для создания клиентов: по тестам возвращает 502 Bad Gateway.\n"
+        "3. Кнопка WB оставлена только как информационная, если метод позже восстановится.\n\n"
         "Рекомендуемый сценарий сейчас: Telemost + отдельная ссылка на каждого клиента/устройство.\n\n"
         "Стабильность Telemost:\n"
         "• systemd автоматически перезапускает упавшие подключения;\n"
         "• watchdog перезапускает только failed/inactive enabled сервисы;\n"
         "• active-сессии не перезапускаются автоматически;\n"
-        "• кнопка ♻️ Stable restart вручную сбрасывает Telemost-подключение."
+        "• кнопка ♻️ Stable restart вручную сбрасывает Telemost-подключение;\n"
+        "• если клиент после Stop/Start не возвращается, нажмите ♻️ Stable restart и затем Start в приложении."
     )
 
 
@@ -666,7 +674,7 @@ def dashboard_text() -> str:
         f"🟢 Работают: {data['active']}\n"
         f"🔴 Остановлены: {data['stopped']}\n\n"
         "Провайдеры:\n"
-        f"🟣 WB Stream: {wb_count}\n"
+        f"🟣 WB Stream: {wb_count} — создание отключено\n"
         f"🟡 Яндекс Телемост: {telemost_count}\n\n"
         "Транспорты:\n"
         f"⚡ datachannel: {data_count}\n"
@@ -885,6 +893,16 @@ async def create_start(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@dp.callback_query(F.data == "wb_info")
+async def wb_info(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.message.answer(WB_STREAM_DOWN_MESSAGE, reply_markup=provider_kb("provider"))
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("provider:"))
 async def choose_provider(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
@@ -896,26 +914,21 @@ async def choose_provider(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Неизвестный провайдер", show_alert=True)
         return
 
-    await state.update_data(provider=provider_key)
-
     if provider_key == "wbstream":
-        await state.set_state(CreateClient.wb_transport)
-        await callback.message.answer(
-            "WB Stream — экспериментальный режим\n\n"
-            "Рекомендуется: vp8channel + ручной ID.\n"
-            "datachannel может не работать без прав canPublishData.\n\n"
-            "Выберите transport:",
-            reply_markup=wb_transport_kb("wbtransport"),
-        )
-    else:
-        await state.update_data(transport="vp8channel", room_mode="manual")
-        await state.set_state(CreateClient.name)
-        await callback.message.answer(
-            "Яндекс Телемост — основной стабильный режим\n"
-            "Carrier: telemost\n"
-            "Transport: vp8channel\n\n"
-            "Введите имя клиента."
-        )
+        await state.clear()
+        await callback.message.answer(WB_STREAM_DOWN_MESSAGE, reply_markup=provider_kb("provider"))
+        await callback.answer()
+        return
+
+    await state.update_data(provider=provider_key)
+    await state.update_data(transport="vp8channel", room_mode="manual")
+    await state.set_state(CreateClient.name)
+    await callback.message.answer(
+        "Яндекс Телемост — основной стабильный режим\n"
+        "Carrier: telemost\n"
+        "Transport: vp8channel\n\n"
+        "Введите имя клиента."
+    )
 
     await callback.answer()
 
@@ -1284,7 +1297,7 @@ async def stable_restart_client(callback: CallbackQuery) -> None:
         stable_restart_service(client_id)
         await callback.message.answer(
             f"Stable restart выполнен: {client_id}\n"
-            "Если Telemost подвисал, подождите 10–20 секунд и обновите подключение на клиенте."
+            "Если Telemost подвисал, подождите 10–20 секунд, затем в приложении клиента нажмите Stop → Start."
         )
     except Exception as e:
         await callback.message.answer(f"Ошибка stable restart:\n\n<code>{str(e)}</code>", parse_mode="HTML")
