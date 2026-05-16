@@ -39,7 +39,7 @@ OLCRTC_GENERATION = os.getenv("OLCRTC_GENERATION", "legacy").strip().lower()
 OLCRTC_URI_FORMAT = os.getenv("OLCRTC_URI_FORMAT", "legacy").strip().lower()
 
 TELEMOST_STABLE_MODE = os.getenv("TELEMOST_STABLE_MODE", "1").strip() != "0"
-TELEMOST_AUTO_RESTART_MINUTES = os.getenv("TELEMOST_AUTO_RESTART_MINUTES", "180").strip() or "180"
+TELEMOST_AUTO_RESTART_MINUTES = os.getenv("TELEMOST_AUTO_RESTART_MINUTES", "0").strip() or "0"
 TELEMOST_LOG_STALL_MINUTES = os.getenv("TELEMOST_LOG_STALL_MINUTES", "0").strip() or "0"
 
 CLIENT_ENV_DIR = Path("/etc/olcrtc/clients")
@@ -406,6 +406,16 @@ def stable_restart_service(client_id: str) -> None:
     restart_service(client_id)
 
 
+def is_enabled(client_id: str) -> bool:
+    result = subprocess.run(
+        ["systemctl", "is-enabled", service_name(client_id)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip() == "enabled"
+
+
 def service_main_pid(client_id: str) -> str:
     result = subprocess.run(
         ["systemctl", "show", service_name(client_id), "-p", "MainPID", "--value"],
@@ -632,7 +642,8 @@ def help_text() -> str:
         "Рекомендуемый сценарий сейчас: Telemost + отдельная ссылка на каждого клиента/устройство.\n\n"
         "Стабильность Telemost:\n"
         "• systemd автоматически перезапускает упавшие подключения;\n"
-        "• watchdog проверяет сервисы и перезапускает зависшие/слишком долгие Telemost-сессии;\n"
+        "• watchdog перезапускает только failed/inactive enabled сервисы;\n"
+        "• active-сессии не перезапускаются автоматически;\n"
         "• кнопка ♻️ Stable restart вручную сбрасывает Telemost-подключение."
     )
 
@@ -661,7 +672,7 @@ def dashboard_text() -> str:
         f"⚡ datachannel: {data_count}\n"
         f"🎥 vp8channel: {vp8_count}\n\n"
         f"Режим olcrtc: {OLCRTC_GENERATION}\n"
-        f"Telemost stable: {'on' if TELEMOST_STABLE_MODE else 'off'} / auto-restart {TELEMOST_AUTO_RESTART_MINUTES} мин\n"
+        f"Telemost safe watchdog: {'on' if TELEMOST_STABLE_MODE else 'off'} / active-сессии не трогаем\n"
         f"Watchdog: {watchdog_status_text()}\n"
         "Правило: 1 ссылка = 1 устройство."
     )
@@ -1325,6 +1336,7 @@ async def diagnostics(callback: CallbackQuery) -> None:
     await callback.message.answer(
         f"Диагностика {client_id}\n\n"
         f"Статус: {'active' if active else 'inactive'}\n"
+        f"Enabled: {'yes' if is_enabled(client_id) else 'no'}\n"
         f"Uptime: {service_uptime_text(client_id)}\n"
         f"Watchdog: {watchdog_status_text()}\n\n"
         f"ENV:\n<code>{env_safe}</code>\n\n"

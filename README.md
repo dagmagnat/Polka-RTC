@@ -346,15 +346,11 @@ olcrtc:// ссылки клиентов
 
 ```bash
 TELEMOST_STABLE_MODE=1
-TELEMOST_AUTO_RESTART_MINUTES=180
+TELEMOST_AUTO_RESTART_MINUTES=0
 TELEMOST_LOG_STALL_MINUTES=0
 ```
 
-`TELEMOST_AUTO_RESTART_MINUTES=180` означает плановый restart Telemost-процесса примерно раз в 3 часа. Если не хотите плановый restart, поставьте:
-
-```bash
-TELEMOST_AUTO_RESTART_MINUTES=0
-```
+`TELEMOST_AUTO_RESTART_MINUTES=0` означает плановый restart Telemost-процесса примерно раз в 3 часа. Плановый restart активных сессий отключён, потому что он может выбивать клиентов из встречи.
 
 После изменения:
 
@@ -372,4 +368,37 @@ tail -n 100 /var/log/polka-rtc-watchdog.log
 ```
 
 Важно: одна ссылка всё равно рассчитана на одно устройство/одно подключение. Для второго устройства создавайте отдельную ссылку.
+
+
+## Исправление Telemost watchdog
+
+В этой версии watchdog больше не перезапускает активные Telemost-сессии по таймеру.
+
+Правильная логика:
+
+```text
+active / activating        -> не трогать
+failed + enabled           -> reset-failed + restart
+inactive + enabled         -> restart
+inactive/failed + disabled -> не трогать, значит клиент был остановлен вручную
+```
+
+Ссылка клиента при восстановлении не меняется: используются те же `ROOM_ID`, `AUTH_KEY` и `CLIENT_ID`.
+
+После обновления установщик автоматически выставляет:
+
+```bash
+TELEMOST_AUTO_RESTART_MINUTES=0
+TELEMOST_LOG_STALL_MINUTES=0
+```
+
+Это применяется и к `/etc/polka-rtc-bot.env`, и к уже созданным Telemost-клиентам в `/etc/olcrtc/clients/*.env`.
+
+Если Telemost подвис, используйте ручную кнопку в боте:
+
+```text
+♻️ Stable restart
+```
+
+Она перезапустит конкретный сервис вручную, но автоматический watchdog живые сессии больше не рвёт.
 

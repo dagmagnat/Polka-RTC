@@ -150,6 +150,7 @@ if [[ "$INSTALL_MODE" == "1" ]]; then
 
   echo
   echo "Restarting bot..."
+  disable_telemost_periodic_restart
   systemctl enable --now polka-rtc-bot
   systemctl enable --now polka-rtc-watchdog.timer
   systemctl restart polka-rtc-bot
@@ -238,8 +239,8 @@ VP8_BATCH=64
 # Telemost stability mode.
 # 0 disables stable fields for new Telemost clients.
 TELEMOST_STABLE_MODE=1
-# 0 disables periodic restart. Recommended range: 120-360.
-TELEMOST_AUTO_RESTART_MINUTES=180
+# 0 is recommended. Active Telemost sessions must not be restarted automatically.
+TELEMOST_AUTO_RESTART_MINUTES=0
 # Disabled by default because some healthy olcrtc builds are quiet.
 TELEMOST_LOG_STALL_MINUTES=0
 
@@ -262,6 +263,7 @@ set +a
 
 echo
 echo "Starting bot..."
+disable_telemost_periodic_restart
 systemctl enable --now polka-rtc-bot
 systemctl enable --now polka-rtc-watchdog.timer
 systemctl restart polka-rtc-bot

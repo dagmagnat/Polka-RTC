@@ -3,8 +3,6 @@ set -euo pipefail
 
 CLIENT_DIR="${CLIENT_DIR:-/etc/olcrtc/clients}"
 LOG_FILE="${WATCHDOG_LOG_FILE:-/var/log/polka-rtc-watchdog.log}"
-DEFAULT_AUTO_RESTART_MINUTES="${TELEMOST_AUTO_RESTART_MINUTES:-180}"
-DEFAULT_LOG_STALL_MINUTES="${TELEMOST_LOG_STALL_MINUTES:-0}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
@@ -25,6 +23,7 @@ if [[ ! -d "$CLIENT_DIR" ]]; then
 fi
 
 shopt -s nullglob
+
 for env_file in "$CLIENT_DIR"/*.env; do
   client_id="$(basename "$env_file" .env)"
   unit="olcrtc-client@${client_id}.service"
@@ -32,45 +31,35 @@ for env_file in "$CLIENT_DIR"/*.env; do
   set +u
   CARRIER=""
   TELEMOST_STABLE_MODE=""
-  TELEMOST_AUTO_RESTART_MINUTES=""
-  TELEMOST_LOG_STALL_MINUTES=""
   # shellcheck disable=SC1090
   source "$env_file"
   set -u
-
-  active="$(systemctl is-active "$unit" 2>/dev/null || true)"
-  if [[ "$active" == "failed" || "$active" == "inactive" || "$active" == "deactivating" ]]; then
-    log "$unit state=$active -> restart"
-    restart_unit "$unit"
-    continue
-  fi
 
   if [[ "$CARRIER" != "telemost" || "${TELEMOST_STABLE_MODE:-1}" == "0" ]]; then
     continue
   fi
 
-  auto_minutes="${TELEMOST_AUTO_RESTART_MINUTES:-$DEFAULT_AUTO_RESTART_MINUTES}"
-  stall_minutes="${TELEMOST_LOG_STALL_MINUTES:-$DEFAULT_LOG_STALL_MINUTES}"
+  enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+  active="$(systemctl is-active "$unit" 2>/dev/null || true)"
 
-  if [[ "$auto_minutes" =~ ^[0-9]+$ && "$auto_minutes" -gt 0 ]]; then
-    pid="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || echo 0)"
-    if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]]; then
-      etimes="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)"
-      if [[ "$etimes" =~ ^[0-9]+$ && "$etimes" -gt $((auto_minutes * 60)) ]]; then
-        log "$unit uptime=${etimes}s > ${auto_minutes}m -> stable restart"
-        restart_unit "$unit"
-        continue
-      fi
+  # If the device was stopped from the bot, the unit is disabled. Do not revive it.
+  if [[ "$enabled" != "enabled" ]]; then
+    if [[ "$active" == "failed" ]]; then
+      log "$unit state=failed but enabled=$enabled -> skip"
     fi
+    continue
   fi
 
-  # Optional. Disabled by default because some olcrtc builds are quiet while healthy.
-  if [[ "$stall_minutes" =~ ^[0-9]+$ && "$stall_minutes" -gt 0 ]]; then
-    recent="$(journalctl -u "$unit" --since "${stall_minutes} minutes ago" --no-pager 2>/dev/null || true)"
-    if ! echo "$recent" | grep -Eiq 'connected|link|state|publisher|subscriber|packet|bytes|room|ice|webrtc|telemost'; then
-      log "$unit no recent activity markers for ${stall_minutes}m -> restart"
+  case "$active" in
+    active|activating)
+      # Never restart a living Telemost call automatically.
+      ;;
+    failed|inactive|deactivating)
+      log "$unit state=$active enabled=$enabled -> restart"
       restart_unit "$unit"
-      continue
-    fi
-  fi
+      ;;
+    *)
+      log "$unit state=$active enabled=$enabled -> no action"
+      ;;
+  esac
 done
