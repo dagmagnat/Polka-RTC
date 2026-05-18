@@ -3,9 +3,8 @@ set -euo pipefail
 
 CLIENT_DIR="${CLIENT_DIR:-/etc/olcrtc/clients}"
 LOG_FILE="${WATCHDOG_LOG_FILE:-/var/log/polka-rtc-watchdog.log}"
-STATE_DIR="${WATCHDOG_STATE_DIR:-/var/lib/polka-rtc/watchdog}"
 
-mkdir -p "$(dirname "$LOG_FILE")" "$STATE_DIR"
+mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {
   echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"
@@ -16,34 +15,6 @@ restart_unit() {
   systemctl reset-failed "$unit" >/dev/null 2>&1 || true
   systemctl restart "$unit" >/dev/null 2>&1 || true
   log "restart $unit"
-}
-
-should_auto_recover() {
-  local client_id="$1"
-  local interval_minutes="$2"
-  local stamp_file="${STATE_DIR}/${client_id}.autorecovery"
-
-  [[ "$interval_minutes" =~ ^[0-9]+$ ]] || return 1
-  [[ "$interval_minutes" -gt 0 ]] || return 1
-
-  local now
-  now="$(date +%s)"
-
-  if [[ ! -f "$stamp_file" ]]; then
-    echo "$now" > "$stamp_file"
-    return 1
-  fi
-
-  local last
-  last="$(cat "$stamp_file" 2>/dev/null || echo 0)"
-  [[ "$last" =~ ^[0-9]+$ ]] || last=0
-
-  if (( now - last >= interval_minutes * 60 )); then
-    echo "$now" > "$stamp_file"
-    return 0
-  fi
-
-  return 1
 }
 
 if [[ ! -d "$CLIENT_DIR" ]]; then
@@ -60,8 +31,6 @@ for env_file in "$CLIENT_DIR"/*.env; do
   set +u
   CARRIER=""
   TELEMOST_STABLE_MODE=""
-  TELEMOST_AUTO_RECOVERY=""
-  TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=""
   # shellcheck disable=SC1090
   source "$env_file"
   set -u
@@ -83,13 +52,7 @@ for env_file in "$CLIENT_DIR"/*.env; do
 
   case "$active" in
     active|activating)
-      if [[ "${TELEMOST_AUTO_RECOVERY:-0}" == "1" ]]; then
-        interval="${TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES:-5}"
-        if should_auto_recover "$client_id" "$interval"; then
-          log "$unit auto-recovery enabled interval=${interval}m -> stable restart"
-          restart_unit "$unit"
-        fi
-      fi
+      # Never restart a living Telemost call automatically.
       ;;
     failed|inactive|deactivating)
       log "$unit state=$active enabled=$enabled -> restart"

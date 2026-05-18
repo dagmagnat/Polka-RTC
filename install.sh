@@ -3,6 +3,10 @@ set -euo pipefail
 
 REPO_URL="${POLKA_RTC_REPO_URL:-https://github.com/dagmagnat/polka-rtc.git}"
 
+# Official olcrtc source. No client patches are applied by this installer.
+OLCRTC_REPO_URL="${OLCRTC_REPO_URL:-https://github.com/openlibrecommunity/olcrtc.git}"
+OLCRTC_BRANCH="${OLCRTC_BRANCH:-refactor/universal-carrier}"
+
 if [[ ! -f "./bot.py" || ! -f "./requirements.txt" || ! -f "./polka-olcrtc-run" || ! -f "./polka-rtc-backup" || ! -f "./polka-rtc-watchdog" ]]; then
   echo "Full project files not found near install.sh."
   echo "Cloning full Polka RTC project from: ${REPO_URL}"
@@ -15,7 +19,7 @@ if [[ ! -f "./bot.py" || ! -f "./requirements.txt" || ! -f "./polka-olcrtc-run" 
   git clone "$REPO_URL" "$TMP_DIR"
 
   cd "$TMP_DIR"
-  exec bash ./install.sh
+  exec bash ./install.sh "$@"
 fi
 
 APP_DIR="/opt/polka-rtc-bot"
@@ -110,11 +114,11 @@ EOF
 
   cat > /etc/systemd/system/polka-rtc-watchdog.timer <<'EOF'
 [Unit]
-Description=Run Polka RTC watchdog every 1 minute
+Description=Run Polka RTC watchdog every 3 minutes
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
+OnBootSec=2min
+OnUnitActiveSec=3min
 AccuracySec=30s
 Persistent=true
 
@@ -175,16 +179,6 @@ disable_telemost_periodic_restart() {
         sed -i 's/^TELEMOST_LOG_STALL_MINUTES=.*/TELEMOST_LOG_STALL_MINUTES=0/' "$f"
       else
         echo 'TELEMOST_LOG_STALL_MINUTES=0' >> "$f"
-      fi
-
-      if ! grep -q '^TELEMOST_AUTO_RECOVERY=' "$f"; then
-        echo 'TELEMOST_AUTO_RECOVERY=0' >> "$f"
-      fi
-
-      if grep -q '^TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=' "$f"; then
-        sed -i 's/^TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=.*/TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=5/' "$f"
-      else
-        echo 'TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES=5' >> "$f"
       fi
     done
   fi
@@ -253,9 +247,9 @@ EOF
   source /etc/profile.d/go.sh
 
   echo
-  echo "Building OlcRTC..."
+  echo "Building original OlcRTC from $OLCRTC_REPO_URL branch $OLCRTC_BRANCH..."
   rm -rf "$OLCRTC_SRC"
-  git clone https://github.com/openlibrecommunity/olcrtc --recurse-submodules "$OLCRTC_SRC"
+  git clone --branch "$OLCRTC_BRANCH" --recurse-submodules "$OLCRTC_REPO_URL" "$OLCRTC_SRC"
   cd "$OLCRTC_SRC"
   go install github.com/magefile/mage@latest
   /root/go/bin/mage buildCLI
@@ -301,9 +295,9 @@ TELEMOST_AUTO_RESTART_MINUTES=0
 # Disabled by default because some healthy olcrtc builds are quiet.
 TELEMOST_LOG_STALL_MINUTES=0
 
-# legacy = old olcrtc CLI flags. refactor = new YAML config mode.
-# Leave legacy unless you intentionally installed the refactor/universal-carrier build.
-OLCRTC_GENERATION=legacy
+# refactor = original olcrtc refactor/universal-carrier YAML config mode.
+# URI format is left legacy for current OlcBox compatibility.
+OLCRTC_GENERATION=refactor
 OLCRTC_URI_FORMAT=legacy
 
 BACKUP_DIR=/var/backups/polka-rtc

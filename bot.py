@@ -29,7 +29,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_PROXY = os.getenv("BOT_PROXY", "").strip()
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 
-APP_VERSION = "telemost-auto-recovery-2026-05-15-3"
+APP_VERSION = "original-olcrtc-refactor-bot-2026-05-18-1"
 
 OLCRTC_BIN = os.getenv("OLCRTC_BIN", "/opt/olcrtc/bin/olcrtc")
 DB_PATH = os.getenv("DB_PATH", "/var/lib/polka-rtc/polka.db")
@@ -43,7 +43,6 @@ OLCRTC_URI_FORMAT = os.getenv("OLCRTC_URI_FORMAT", "legacy").strip().lower()
 TELEMOST_STABLE_MODE = os.getenv("TELEMOST_STABLE_MODE", "1").strip() != "0"
 TELEMOST_AUTO_RESTART_MINUTES = os.getenv("TELEMOST_AUTO_RESTART_MINUTES", "0").strip() or "0"
 TELEMOST_LOG_STALL_MINUTES = os.getenv("TELEMOST_LOG_STALL_MINUTES", "0").strip() or "0"
-TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES = os.getenv("TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES", "5").strip() or "5"
 
 CLIENT_ENV_DIR = Path("/etc/olcrtc/clients")
 
@@ -70,17 +69,30 @@ class AddDevice(StatesGroup):
     room = State()
 
 
+class EditRoom(StatesGroup):
+    room = State()
+
+
 PROVIDERS = {
-    "wbstream": {
-        "title": "WB Stream",
-        "short": "WB",
-        "carrier": "wbstream",
+    "jitsi": {
+        "title": "Jitsi Meet",
+        "short": "Jitsi",
+        "carrier": "jitsi",
+        "transport": "datachannel",
+        "description": "рекомендуется авторами olcrtc для стабильного datachannel",
     },
     "telemost": {
         "title": "Яндекс Телемост",
         "short": "Telemost",
         "carrier": "telemost",
         "transport": "vp8channel",
+        "description": "работает через vp8channel, но тяжелый трафик может перегружать канал",
+    },
+    "wbstream": {
+        "title": "WB Stream",
+        "short": "WB",
+        "carrier": "wbstream",
+        "description": "оставлен как информационный режим: сейчас часто возвращает 502/guest ограничения",
     },
 }
 
@@ -98,11 +110,13 @@ WB_TRANSPORTS = {
 }
 
 WB_STREAM_DOWN_MESSAGE = (
-    "🟣 WB Stream сейчас временно отключён для создания клиентов.\n\n"
-    "По логам он возвращает 502 Bad Gateway и не запускается ни через datachannel, ни через vp8channel.\n"
-    "Кнопка оставлена только как информационная, чтобы не забыть про метод, если WB снова заработает.\n\n"
-    "Рабочий основной режим сейчас:\n"
-    "🟡 Яндекс Телемост + vp8channel + ручной ID встречи."
+    "🟣 WB Stream сейчас оставлен как информационный режим.\n\n"
+    "По твоим тестам WB Stream возвращал 502 Bad Gateway и не запускался ни через datachannel, ни через vp8channel.\n"
+    "В официальной матрице refactor/universal-carrier WB помечен рабочим не для datachannel, "
+    "но guest-flow и ручные комнаты могут отличаться. Поэтому бот не выдаёт WB-ссылки по умолчанию.\n\n"
+    "Основные рабочие режимы в этой сборке:\n"
+    "🟢 Jitsi + datachannel — основной рекомендуемый режим olcrtc.\n"
+    "🟡 Telemost + vp8channel — запасной режим."
 )
 
 WB_AUTO_ID_WARNING = (
@@ -209,6 +223,15 @@ def db_delete(client_id: str) -> None:
         conn.commit()
 
 
+def db_update_room(client_id: str, room_id: str, uri: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE clients SET room_id = ?, uri = ? WHERE client_id = ?",
+            (room_id, uri, client_id),
+        )
+        conn.commit()
+
+
 def next_device_no(display_name: str) -> int:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
@@ -265,19 +288,26 @@ def make_key() -> str:
     return secrets.token_hex(32)
 
 
-def extract_room_id(text: str) -> str:
-    digit = re.findall(r"\d{6,}", text)
+def extract_room_id(text: str, carrier: str = "") -> str:
+    value = (text or "").strip()
+
+    # Jitsi works best with the full meeting URL, for example:
+    # https://meet.cryptopro.ru/myroom or https://meet.jit.si/myroom
+    if carrier == "jitsi":
+        return value
+
+    digit = re.findall(r"\d{6,}", value)
     if digit:
         return digit[0]
 
     uuid_like = re.findall(
         r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        text,
+        value,
     )
     if uuid_like:
         return uuid_like[0]
 
-    found = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9-]{5,}", text)
+    found = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9-]{5,}", value)
     bad = {
         "https", "http", "telemost", "yandex", "wbstream", "stream", "wb", "ru",
         "com", "www", "join", "meeting", "room",
@@ -349,6 +379,11 @@ net:
   transport: {transport}
   dns: "{DNS}"
 
+liveness:
+  interval: 10s
+  timeout: 5s
+  failures: 3
+
 socks:
   proxy_addr: ""
   proxy_port: 0
@@ -378,8 +413,6 @@ def write_env(row: dict) -> None:
         lines.append(f"TELEMOST_STABLE_MODE={'1' if TELEMOST_STABLE_MODE else '0'}")
         lines.append(f"TELEMOST_AUTO_RESTART_MINUTES={TELEMOST_AUTO_RESTART_MINUTES}")
         lines.append(f"TELEMOST_LOG_STALL_MINUTES={TELEMOST_LOG_STALL_MINUTES}")
-        lines.append("TELEMOST_AUTO_RECOVERY=0")
-        lines.append(f"TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES={TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES}")
 
     if row["transport"] == "vp8channel":
         lines.append(f"VP8_FPS={VP8_FPS}")
@@ -502,6 +535,17 @@ def get_logs(client_id: str, lines: int = 80) -> str:
     return text[-3500:] if text else "Логов пока нет."
 
 
+def get_service_status(client_id: str) -> str:
+    result = subprocess.run(
+        ["systemctl", "status", service_name(client_id), "--no-pager", "-l"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=20,
+    )
+    return result.stdout.strip()[-3500:] or "нет вывода"
+
+
 def get_env_safe(client_id: str) -> str:
     env_path = CLIENT_ENV_DIR / f"{client_id}.env"
     if not env_path.exists():
@@ -520,57 +564,6 @@ def get_env_safe(client_id: str) -> str:
         safe_lines.append("YAML_CONFIG=present")
 
     return "\n".join(safe_lines)
-
-
-def client_env_path(client_id: str) -> Path:
-    return CLIENT_ENV_DIR / f"{client_id}.env"
-
-
-def read_client_env(client_id: str) -> dict[str, str]:
-    env_path = client_env_path(client_id)
-    values: dict[str, str] = {}
-
-    if not env_path.exists():
-        return values
-
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-
-    return values
-
-
-def get_client_env_value(client_id: str, key: str, default: str = "") -> str:
-    return read_client_env(client_id).get(key, default)
-
-
-def set_client_env_value(client_id: str, key: str, value: str) -> None:
-    env_path = client_env_path(client_id)
-    if not env_path.exists():
-        raise FileNotFoundError(f"env-файл не найден: {env_path}")
-
-    lines = env_path.read_text(encoding="utf-8").splitlines()
-    found = False
-    new_lines = []
-
-    for line in lines:
-        if line.startswith(f"{key}="):
-            new_lines.append(f"{key}={value}")
-            found = True
-        else:
-            new_lines.append(line)
-
-    if not found:
-        new_lines.append(f"{key}={value}")
-
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    env_path.chmod(0o600)
-
-
-def is_auto_recovery_enabled(client_id: str) -> bool:
-    return get_client_env_value(client_id, "TELEMOST_AUTO_RECOVERY", "0") == "1"
 
 
 def create_backup() -> str:
@@ -598,8 +591,9 @@ def main_kb() -> ReplyKeyboardMarkup:
 def provider_kb(prefix: str = "provider") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🟡 Яндекс Телемост — стабильно", callback_data=f"{prefix}:telemost")],
-            [InlineKeyboardButton(text="🟣 WB Stream — временно не работает", callback_data="wb_info")],
+            [InlineKeyboardButton(text="🟢 Jitsi Meet — datachannel", callback_data=f"{prefix}:jitsi")],
+            [InlineKeyboardButton(text="🟡 Яндекс Телемост — vp8channel", callback_data=f"{prefix}:telemost")],
+            [InlineKeyboardButton(text="🟣 WB Stream — информация", callback_data="wb_info")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")],
         ]
     )
@@ -669,15 +663,13 @@ def client_kb(client_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔗 Ссылка", callback_data=f"link:{client_id}")],
             [InlineKeyboardButton(text="📷 QR", callback_data=f"qr:{client_id}")],
             [InlineKeyboardButton(text="➕ Добавить устройство", callback_data=f"add:{client_id}")],
+            [InlineKeyboardButton(text="🔁 Сменить Room ID", callback_data=f"editroom:{client_id}")],
             [InlineKeyboardButton(text="🔄 Перезапустить", callback_data=f"restart:{client_id}")],
-            [InlineKeyboardButton(text="♻️ Stable restart", callback_data=f"stable_restart:{client_id}")],
-            [InlineKeyboardButton(
-                text=("🛟 Автовосст. 5м: ВКЛ" if is_auto_recovery_enabled(client_id) else "🛟 Автовосст. 5м: ВЫКЛ"),
-                callback_data=f"autorec:{client_id}",
-            )],
+            [InlineKeyboardButton(text="♻️ Reset failed + restart", callback_data=f"stable_restart:{client_id}")],
             start_stop_row,
             [InlineKeyboardButton(text="🧪 Диагностика", callback_data=f"diag:{client_id}")],
             [InlineKeyboardButton(text="📜 Логи", callback_data=f"logs:{client_id}")],
+            [InlineKeyboardButton(text="🔎 Статус systemd", callback_data=f"svcstatus:{client_id}")],
             [InlineKeyboardButton(text="🗑 Удалить устройство", callback_data=f"del:{client_id}")],
             [InlineKeyboardButton(text="📋 Список клиентов", callback_data="list")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
@@ -712,8 +704,7 @@ def help_text() -> str:
         "• watchdog перезапускает только failed/inactive enabled сервисы;\n"
         "• active-сессии не перезапускаются автоматически;\n"
         "• кнопка ♻️ Stable restart вручную сбрасывает Telemost-подключение;\n"
-        "• если клиент после Stop/Start не возвращается, нажмите ♻️ Stable restart и затем Start в приложении;\n"
-        "• 🛟 Автовосст. 5м можно включить для конкретного клиента — бот будет сам делать Stable restart примерно раз в 5 минут. Это жёсткий режим и может кратко рвать активное соединение."
+        "• если клиент после Stop/Start не возвращается, нажмите ♻️ Stable restart и затем Start в приложении."
     )
 
 
@@ -736,7 +727,7 @@ def dashboard_text() -> str:
         f"🟢 Работают: {data['active']}\n"
         f"🔴 Остановлены: {data['stopped']}\n\n"
         "Провайдеры:\n"
-        f"🟣 WB Stream: {wb_count} — создание отключено\n"
+        f"🟣 WB Stream: {wb_count} — инфо/выключено\n"
         f"🟡 Яндекс Телемост: {telemost_count}\n\n"
         "Транспорты:\n"
         f"⚡ datachannel: {data_count}\n"
@@ -775,15 +766,17 @@ async def send_qr(message: Message, client_id: str, uri: str) -> None:
 
 
 async def ask_room_id(message: Message, carrier: str) -> None:
-    if carrier == "wbstream":
+    if carrier == "jitsi":
         await message.answer(
-            "Отправьте ID WB Stream.\n\n"
-            "⚠️ Сейчас для WB Stream надёжнее использовать ручной ID: комнату нужно создать заранее на stream.wb.ru.\n\n"
-            "Можно вставить только ID, например:\n"
-            "<code>019e20e6-9f02-77db-a198-2e97a3278d89</code>\n\n"
-            "Или вставить ссылку/текст, если ID в нём присутствует.",
+            "Отправьте ссылку Jitsi-комнаты.\n\n"
+            "Рекомендуемый пример:\n"
+            "<code>https://meet.cryptopro.ru/polka-room-001</code>\n\n"
+            "Можно использовать и другой Jitsi Meet, например meet.jit.si. "
+            "Для каждого клиента лучше создавать отдельную комнату/ссылку.",
             parse_mode="HTML",
         )
+    elif carrier == "wbstream":
+        await message.answer(WB_STREAM_DOWN_MESSAGE)
     else:
         await message.answer(
             "Отправьте ID/ссылку Яндекс Телемоста.\n\n"
@@ -982,16 +975,29 @@ async def choose_provider(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
 
-    await state.update_data(provider=provider_key)
-    await state.update_data(transport="vp8channel", room_mode="manual")
-    await state.set_state(CreateClient.name)
-    await callback.message.answer(
-        "Яндекс Телемост — основной стабильный режим\n"
-        "Carrier: telemost\n"
-        "Transport: vp8channel\n\n"
-        "Введите имя клиента."
-    )
+    provider = PROVIDERS[provider_key]
+    transport = provider.get("transport", "vp8channel")
 
+    await state.update_data(provider=provider_key)
+    await state.update_data(transport=transport, room_mode="manual")
+    await state.set_state(CreateClient.name)
+
+    if provider_key == "jitsi":
+        text = (
+            "Jitsi Meet — рекомендуемый оригинальный режим olcrtc\n"
+            "Carrier: jitsi\n"
+            "Transport: datachannel\n\n"
+            "Введите имя клиента."
+        )
+    else:
+        text = (
+            "Яндекс Телемост — запасной режим\n"
+            "Carrier: telemost\n"
+            "Transport: vp8channel\n\n"
+            "Введите имя клиента."
+        )
+
+    await callback.message.answer(text)
     await callback.answer()
 
 
@@ -1084,7 +1090,7 @@ async def create_room(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    room_id = extract_room_id(message.text)
+    room_id = extract_room_id(message.text, PROVIDERS[data["provider"]]["carrier"])
 
     if not room_id:
         await message.answer("Не нашёл ID. Отправьте ссылку или ID ещё раз.")
@@ -1192,21 +1198,17 @@ async def add_provider(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Неизвестный провайдер", show_alert=True)
         return
 
-    await state.update_data(provider=provider_key)
-
     if provider_key == "wbstream":
-        await state.set_state(AddDevice.wb_transport)
-        await callback.message.answer(
-            "WB Stream — экспериментальный режим\n\n"
-            "Рекомендуется: vp8channel + ручной ID.\n"
-            "datachannel может не работать без прав canPublishData.\n\n"
-            "Выберите transport:",
-            reply_markup=wb_transport_kb("addwbtransport"),
-        )
-    else:
-        await state.update_data(transport="vp8channel", room_mode="manual")
-        await state.set_state(AddDevice.room)
-        await ask_room_id(callback.message, "telemost")
+        await state.clear()
+        await callback.message.answer(WB_STREAM_DOWN_MESSAGE, reply_markup=provider_kb("addprovider"))
+        await callback.answer()
+        return
+
+    provider = PROVIDERS[provider_key]
+    await state.update_data(provider=provider_key)
+    await state.update_data(transport=provider.get("transport", "vp8channel"), room_mode="manual")
+    await state.set_state(AddDevice.room)
+    await ask_room_id(callback.message, provider["carrier"])
 
     await callback.answer()
 
@@ -1280,7 +1282,7 @@ async def add_room(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    room_id = extract_room_id(message.text)
+    room_id = extract_room_id(message.text, PROVIDERS[data["provider"]]["carrier"])
 
     if not room_id:
         await message.answer("Не нашёл ID. Отправьте ссылку или ID ещё раз.")
@@ -1330,6 +1332,94 @@ async def show_qr(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("editroom:"))
+async def edit_room_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+    row = db_get(client_id)
+
+    if not row:
+        await callback.message.answer("Клиент не найден.")
+        await callback.answer()
+        return
+
+    await state.clear()
+    await state.update_data(edit_client_id=client_id)
+    await state.set_state(EditRoom.room)
+    await callback.message.answer(
+        f"🔁 Смена Room ID для <code>{client_id}</code>\n\n"
+        f"Текущий Room ID:\n<code>{row['room_id']}</code>\n\n"
+        "Отправьте новый ID/ссылку комнаты.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.message(EditRoom.room)
+async def edit_room_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    data = await state.get_data()
+    client_id = data.get("edit_client_id")
+    row = db_get(client_id)
+
+    if not row:
+        await state.clear()
+        await message.answer("Клиент не найден.")
+        return
+
+    new_room_id = extract_room_id(message.text, row["carrier"])
+
+    if not new_room_id:
+        await message.answer("Не нашёл ID/ссылку. Отправьте ещё раз.")
+        return
+
+    updated = dict(row)
+    updated["room_id"] = new_room_id
+    updated["uri"] = make_uri(row["carrier"], row["transport"], new_room_id, row["auth_key"], row["client_id"])
+
+    write_env(updated)
+    db_update_room(row["client_id"], new_room_id, updated["uri"])
+
+    try:
+        stable_restart_service(row["client_id"])
+        restart_note = "Сервис перезапущен."
+    except Exception as e:
+        restart_note = f"Не удалось перезапустить автоматически: {e}"
+
+    await state.clear()
+    await message.answer(
+        f"Room ID обновлён для <code>{row['client_id']}</code>\n"
+        f"Новый Room ID:\n<code>{new_room_id}</code>\n\n"
+        f"{restart_note}",
+        parse_mode="HTML",
+    )
+    await send_uri(message, row["client_id"], updated["uri"])
+
+
+@dp.callback_query(F.data.startswith("svcstatus:"))
+async def service_status(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    client_id = callback.data.split(":", 1)[1]
+    try:
+        status = get_service_status(client_id)
+    except Exception as e:
+        status = str(e)
+
+    await callback.message.answer(
+        f"Статус systemd {client_id}:\n\n<code>{status}</code>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("restart:"))
 async def restart_client(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -1347,41 +1437,6 @@ async def restart_client(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("autorec:"))
-async def toggle_auto_recovery(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    client_id = callback.data.split(":", 1)[1]
-    row = db_get(client_id)
-
-    if not row:
-        await callback.answer("Клиент не найден", show_alert=True)
-        return
-
-    if row["carrier"] != "telemost":
-        await callback.answer("Автовосстановление доступно только для Telemost", show_alert=True)
-        return
-
-    try:
-        enabled = is_auto_recovery_enabled(client_id)
-        new_value = "0" if enabled else "1"
-        set_client_env_value(client_id, "TELEMOST_AUTO_RECOVERY", new_value)
-        set_client_env_value(client_id, "TELEMOST_AUTO_RECOVERY_INTERVAL_MINUTES", "5")
-
-        status = "включено" if new_value == "1" else "выключено"
-        await callback.message.answer(
-            f"🛟 Автовосстановление для {client_id}: {status}\n\n"
-            "Если включено, watchdog будет делать Stable restart этого клиента примерно раз в 5 минут. "
-            "Это помогает, когда клиент после Stop/Start не возвращается, но может кратко прерывать активную сессию."
-        )
-    except Exception as e:
-        await callback.message.answer(f"Ошибка изменения автовосстановления:\n\n<code>{str(e)}</code>", parse_mode="HTML")
-
-    await callback.answer()
-
-
 @dp.callback_query(F.data.startswith("stable_restart:"))
 async def stable_restart_client(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -1394,8 +1449,7 @@ async def stable_restart_client(callback: CallbackQuery) -> None:
         stable_restart_service(client_id)
         await callback.message.answer(
             f"Stable restart выполнен: {client_id}\n"
-            "Если Telemost подвисал, подождите 10–20 секунд, затем в приложении клиента нажмите Stop → Start. "
-            "Для автоматического повтора можно включить 🛟 Автовосст. 5м в карточке клиента."
+            "Если Telemost подвисал, подождите 10–20 секунд, затем в приложении клиента нажмите Stop → Start."
         )
     except Exception as e:
         await callback.message.answer(f"Ошибка stable restart:\n\n<code>{str(e)}</code>", parse_mode="HTML")
@@ -1449,8 +1503,7 @@ async def diagnostics(callback: CallbackQuery) -> None:
         f"Статус: {'active' if active else 'inactive'}\n"
         f"Enabled: {'yes' if is_enabled(client_id) else 'no'}\n"
         f"Uptime: {service_uptime_text(client_id)}\n"
-        f"Watchdog: {watchdog_status_text()}\n"
-        f"Auto recovery 5m: {'on' if is_auto_recovery_enabled(client_id) else 'off'}\n\n"
+        f"Watchdog: {watchdog_status_text()}\n\n"
         f"ENV:\n<code>{env_safe}</code>\n\n"
         f"LOGS:\n<code>{logs}</code>",
         parse_mode="HTML",
