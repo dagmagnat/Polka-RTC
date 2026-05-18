@@ -22,6 +22,9 @@ if [[ ! -f "./bot.py" || ! -f "./requirements.txt" || ! -f "./polka-olcrtc-run" 
   exec bash ./install.sh "$@"
 fi
 
+# Keep the Polka RTC project directory fixed, because the installer later cd-s into /tmp and /opt/olcrtc-src.
+PROJECT_DIR="$(pwd)"
+
 APP_DIR="/opt/polka-rtc-bot"
 ENV_FILE="/etc/polka-rtc-bot.env"
 DB_DIR="/var/lib/polka-rtc"
@@ -64,11 +67,11 @@ install_bot_files() {
 
   echo
   echo "Installing Polka RTC bot files..."
-  cp -f ./bot.py "$APP_DIR/bot.py"
-  cp -f ./requirements.txt "$APP_DIR/requirements.txt"
-  cp -f ./polka-olcrtc-run /usr/local/bin/polka-olcrtc-run
-  cp -f ./polka-rtc-backup /usr/local/bin/polka-rtc-backup
-  cp -f ./polka-rtc-watchdog /usr/local/bin/polka-rtc-watchdog
+  cp -f "$PROJECT_DIR/bot.py" "$APP_DIR/bot.py"
+  cp -f "$PROJECT_DIR/requirements.txt" "$APP_DIR/requirements.txt"
+  cp -f "$PROJECT_DIR/polka-olcrtc-run" /usr/local/bin/polka-olcrtc-run
+  cp -f "$PROJECT_DIR/polka-rtc-backup" /usr/local/bin/polka-rtc-backup
+  cp -f "$PROJECT_DIR/polka-rtc-watchdog" /usr/local/bin/polka-rtc-watchdog
   chmod +x /usr/local/bin/polka-olcrtc-run /usr/local/bin/polka-rtc-backup /usr/local/bin/polka-rtc-watchdog
 
   echo
